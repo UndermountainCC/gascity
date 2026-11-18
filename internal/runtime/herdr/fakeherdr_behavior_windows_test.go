@@ -31,6 +31,8 @@ func runFakeHerdr(spec fakeHerdrSpec, argv []string, stdout, stderr io.Writer) i
 		return spec.provider(argv, stdout, stderr)
 	case "registry":
 		return spec.registry(argv, stdout, stderr)
+	case "worktree":
+		return spec.worktree(argv, stdout, stderr)
 	}
 	_, _ = fmt.Fprintf(stderr, "fake herdr: unknown mode %q\n", spec.Mode)
 	return 125
@@ -180,6 +182,81 @@ func (s fakeHerdrSpec) start(argv []string, stdout io.Writer) int {
 		out(`{"result":{"tabs":[]}}`)
 	case "tab create":
 		out(`{"result":{"tab":{"tab_id":"t1"},"root_pane":{"pane_id":"stray"}}}`)
+	default:
+		out(`{"result":{}}`)
+	}
+	return 0
+}
+
+// worktree is newFakeWorktreeHerdr's script (worktree_placement_test.go),
+// driven by the state files in State.
+func (s fakeHerdrSpec) worktree(argv []string, stdout, stderr io.Writer) int {
+	argv = shiftSession(argv)
+	appendFakeFile(filepath.Join(s.State, "calls.log"), strings.Join(argv, " ")+"\n")
+	flag := func(name string) string { return filepath.Join(s.State, name) }
+	has := func(name string) bool { return fakeFileExists(flag(name)) }
+	read := func(name string) string {
+		data, _ := os.ReadFile(flag(name))
+		return string(data)
+	}
+	out := func(text string) { _, _ = io.WriteString(stdout, text) }
+	fail := func(text string, code int) int {
+		_, _ = io.WriteString(stderr, text)
+		return code
+	}
+	if positional(argv, 0) == "worktree" && has("unsupported") {
+		return fail("unknown command: worktree\n", 2)
+	}
+	switch positional(argv, 0) + " " + positional(argv, 1) {
+	case "worktree list":
+		out(read("worktrees.json"))
+	case "worktree open":
+		if has("open_error") {
+			return fail(read("open_error"), 1)
+		}
+		if has("open_ws") {
+			out(`{"result":{"type":"worktree_opened","already_open":true,"workspace":{"workspace_id":"w2"},"tab":{"tab_id":"w2:t-active"},"root_pane":{"pane_id":"w2:p-active"}}}`)
+		} else {
+			_ = os.WriteFile(flag("open_ws"), nil, 0o644)
+			out(`{"result":{"type":"worktree_opened","already_open":false,"workspace":{"workspace_id":"w2"},"tab":{"tab_id":"w2:t1"},"root_pane":{"pane_id":"w2:p1"}}}`)
+		}
+	case "workspace list":
+		if has("rig_ws") {
+			out(`{"result":{"workspaces":[{"workspace_id":"w1","label":"` + read("rig_ws") + `"}]}}`)
+		} else {
+			out(`{"result":{"workspaces":[]}}`)
+		}
+	case "workspace create":
+		out(`{"result":{"workspace":{"workspace_id":"w1"},"tab":{"tab_id":"w1:t1"},"root_pane":{"pane_id":"w1:p1"}}}`)
+	case "tab list":
+		ws := positional(argv, 3)
+		switch {
+		case has("ws_gone_" + ws):
+			_ = os.Remove(flag("ws_gone_" + ws))
+			return fail(`{"error":{"code":"workspace_not_found","message":"workspace not found"}}`+"\n", 1)
+		case has("tabs_" + ws):
+			out(read("tabs_" + ws))
+		default:
+			out(`{"result":{"tabs":[]}}`)
+		}
+	case "tab create":
+		ws := positional(argv, 3)
+		if has("tab_create_error_" + ws) {
+			return fail(`{"error":{"code":"workspace_not_found","message":"workspace not found"}}`+"\n", 1)
+		}
+		out(`{"result":{"tab":{"tab_id":"` + ws + `:t9"},"root_pane":{"pane_id":"` + ws + `:p9"}}}`)
+	case "agent start":
+		out(`{"result":{"agent":{"name":"` + positional(argv, 2) + `","pane_id":"` + positional(argv, 6) + `"}}}`)
+	case "agent get":
+		out(`{"error":{"code":"agent_not_found","message":"agent target not found"}}`)
+	case "agent list":
+		out(`{"result":{"agents":[]}}`)
+	case "pane process-info":
+		if has("busy") {
+			out(`{"result":{"process_info":{"shell_pid":4242,"foreground_processes":[{"pid":4243,"name":"claude"}]}}}`)
+		} else {
+			out(`{"result":{"process_info":{"shell_pid":4242,"foreground_processes":[]}}}`)
+		}
 	default:
 		out(`{"result":{}}`)
 	}

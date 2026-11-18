@@ -16,7 +16,7 @@ import (
 
 // fakeHerdrSpec is what one fake herdr does.
 type fakeHerdrSpec struct {
-	// Mode is "reply", "start", "provider" or "registry".
+	// Mode is "reply", "start", "provider", "registry" or "worktree".
 	Mode string `json:"mode"`
 
 	// reply writes Stdout and Stderr, with "$*" in either replaced by the
@@ -38,6 +38,9 @@ type fakeHerdrSpec struct {
 	MetaDir         string `json:"meta_dir,omitempty"`
 	WorkspaceExists bool   `json:"workspace_exists,omitempty"`
 
+	// worktree is newFakeWorktreeHerdr's script (worktree_placement_test.go),
+	// driven by the state files in State.
+	//
 	// registry is registryFake's script (no_named_agent_test.go).
 	Trace     string `json:"trace,omitempty"`
 	List      string `json:"list,omitempty"`

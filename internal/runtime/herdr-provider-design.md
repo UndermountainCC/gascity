@@ -64,6 +64,15 @@ exhaustion; bead az-405 has the full evidence trail). The adapter was rewritten 
 - **Placement** (`ensurePlacement`): find-or-create workspace; close EVERY stale tab
   carrying the session's label; create the tab with cwd+env baked into its root shell
   pane — that root pane is the agent's pane (there is no stray pane to close anymore).
+- **Worktree placement** (`ensureWorktreePlacement`, herdr ≥0.9): a work dir whose
+  nearest `.git` is a file (`linkedWorktreeCandidate`, no git exec) is confirmed
+  against `worktree list --cwd`, then opened with `worktree open --workspace <rig ws>
+  --path --label <tab label> --no-focus` (or the workspace herdr already has open
+  for it is reused). The agent pane is a `tab create --cwd --env` tab inside it,
+  because `worktree open` takes no env. herdr deletes a worktree workspace when its
+  last tab closes, so the root tab and stale same-label tabs close only AFTER the
+  agent tab exists. Any herdr failure falls back to `ensurePlacement` with one
+  `herdr: worktree placement … unavailable, using tab` stderr line.
 - **Names** (`agentname.go`): `herdrAgentName` maps gc names deterministically
   (lowercase, charmap to `-`, 24-char head + fnv32 hash beyond 32). The sidecar's
   exact-name record is the reverse map; `ListRunning` enumerates bound sessions first
