@@ -187,6 +187,17 @@ workspace/tab structure mirrors the town:
 - **One tab per agent.** Rig polecats land in their rig's workspace as
   `polecat-<themed-name>` tabs; the placement is display-only and does not
   change agent identity.
+- **One worktree workspace per worktree session.** When a session's work dir
+  is a linked git worktree (for example one a `pre_start` script created with
+  `git worktree add`), gc opens that checkout as a herdr worktree workspace,
+  labeled with the session's tab label and grouped under its rig's
+  workspace, and the agent runs in a tab inside it. A pool whose sessions
+  each get their own worktree therefore shows one workspace per session. A
+  herdr without `worktree` support, or one that refuses to open the
+  checkout, falls back to a tab in the rig workspace and logs one
+  `herdr: worktree placement … unavailable, using tab` line. gc never
+  creates or removes the worktree: stopping the session closes its tab, herdr
+  drops the then-empty workspace, and the checkout and branch stay on disk.
 
 See `internal/runtime/herdr-provider-design.md` in the source tree for the
 provider's design notes, capabilities, and pilot rationale.
