@@ -127,6 +127,7 @@ go_test(
         "startup_notready_test.go",
         "testenv_import_test.go",
         "verdict_windows_test.go",
+        "worktree_placement_test.go",
     ],
     embed = [":herdr"],
     deps = [
