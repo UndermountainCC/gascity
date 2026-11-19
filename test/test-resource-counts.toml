@@ -2675,6 +2675,11 @@ calls = 2
 medium = 2
 
 [[count]]
+path = "internal/runtime/herdr/worktree_placement_test.go"
+resource = "subprocess"
+calls = 1
+
+[[count]]
 path = "internal/runtime/import_trust_test.go"
 resource = "subprocess"
 calls = 1
