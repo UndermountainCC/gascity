@@ -135,7 +135,8 @@ func (p *Provider) start(ctx context.Context, name string, cfg runtime.Config) e
 	// Place the agent in its own tab under a per-rig (per-town) workspace, or,
 	// when its work dir is in a linked git worktree, in that worktree's herdr
 	// workspace grouped under the rig workspace (see place). Either way agents
-	// are separate switchable spaces rather than tiled panes. The
+	// are separate switchable spaces rather than tiled panes, unless the
+	// session opts into a shared tab with GC_HERDR_PANE_GROUP. The
 	// find-or-create is serialized so concurrent same-rig Starts share one
 	// workspace instead of racing to create duplicates. Under herdr ≥0.7.5 the
 	// tab's root shell pane — created here with the agent's cwd and env — IS
@@ -210,15 +211,27 @@ func (p *Provider) start(ctx context.Context, name string, cfg runtime.Config) e
 	return p.launchOrchestration(ctx, name, cfg, launchedPane{paneID: info.PaneID, workDir: workDir, mode: mode}, startupText)
 }
 
+// envPaneGroup is the session env key that opts a session into a shared tab:
+// its value is the tab's label, and the session's pane is split into it.
+const envPaneGroup = "GC_HERDR_PANE_GROUP"
+
 // place returns the workspace, tab, and fresh shell pane the agent launches
-// into. A work dir inside a linked git worktree goes to that worktree's herdr
+// into. A session whose env sets GC_HERDR_PANE_GROUP is split into that tab of
+// the rig workspace (client.ensureGroupPlacement), whatever its work dir. A
+// work dir inside a linked git worktree goes to that worktree's herdr
 // workspace (client.ensureWorktreePlacement); every other session, and a
-// worktree session herdr cannot place that way, gets a tab in the rig
-// workspace (client.ensurePlacement). The fallback writes one diagnostic
-// unless herdr merely reports the work dir is not in a linked worktree. The
-// caller holds p.mu.
+// session herdr cannot place either way, gets a tab in the rig workspace
+// (client.ensurePlacement). The fallback writes one diagnostic unless herdr
+// merely reports the work dir is not in a linked worktree. The caller holds
+// p.mu.
 func (p *Provider) place(ctx context.Context, name, wsLabel, tabLabel, workDir string, env map[string]string) (agentInfo, error) {
-	if linkedWorktreeCandidate(workDir) {
+	if group := strings.TrimSpace(env[envPaneGroup]); group != "" {
+		info, err := p.c.ensureGroupPlacement(ctx, wsLabel, group, tabLabel, workDir, env)
+		if err == nil {
+			return info, nil
+		}
+		fmt.Fprintf(os.Stderr, "herdr: pane group %q for %q unavailable, using tab: %v\n", group, name, err) //nolint:errcheck // best-effort diagnostic
+	} else if linkedWorktreeCandidate(workDir) {
 		info, err := p.c.ensureWorktreePlacement(ctx, wsLabel, tabLabel, workDir, env)
 		if err == nil {
 			return info, nil
@@ -294,8 +307,10 @@ func (p *Provider) launchCommand(ctx context.Context, name string, spec launchSp
 		}
 		if err == nil && adopted && info.PaneID != "" && info.PaneID != paneID {
 			// Adopted a live holder elsewhere: the fresh pane placed above is
-			// surplus — close it (with its tab) or it leaks one shell per adopt.
-			_ = p.c.tabClose(ctx, placed.TabID)
+			// surplus — close it or it leaks one shell per adopt. Closing the
+			// pane, not its tab, spares the other panes of a shared group tab;
+			// herdr closes a tab whose last pane closes.
+			_ = p.c.closePane(ctx, paneID)
 		}
 	case spec.Raw != "":
 		err = p.launchRaw(ctx, paneID, spec.Raw)
