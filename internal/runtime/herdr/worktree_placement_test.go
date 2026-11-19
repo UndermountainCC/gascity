@@ -38,6 +38,14 @@ import (
 //     workspace_not_found, once
 //   - tab_create_error_<ws>: `tab create --workspace <ws>` fails
 //   - busy: the agent pane runs a foreground process
+//   - panes_<ws>: the `pane list --workspace <ws>` reply
+//   - split_unsupported, rename_unsupported: `pane split` or `pane rename`
+//     fails as an older herdr does
+//   - split_gone: the next `pane split` fails with pane_not_found, once
+//   - record_tabs: `tab create --workspace <ws>` rewrites tabs_<ws> and
+//     panes_<ws> to hold just the tab it created and its root pane
+//
+// `pane split <ws>:<pane>` answers with the new pane <ws>:p8.
 type fakeWorktreeHerdr struct {
 	bin   string
 	state string
@@ -91,7 +99,24 @@ case "$1 $2" in
 		echo '{"error":{"code":"workspace_not_found","message":"workspace not found"}}' >&2
 		exit 1
 	fi
+	if [ -e "$STATE/record_tabs" ]; then
+		printf '{"result":{"tabs":[{"tab_id":"%s:t9","label":"%s"}]}}' "$4" "$6" > "$STATE/tabs_$4"
+		printf '{"result":{"panes":[{"pane_id":"%s:p9","tab_id":"%s:t9"}]}}' "$4" "$4" > "$STATE/panes_$4"
+	fi
 	printf '{"result":{"tab":{"tab_id":"%s:t9"},"root_pane":{"pane_id":"%s:p9"}}}' "$4" "$4" ;;
+"pane list")
+	if [ -e "$STATE/panes_$4" ]; then cat "$STATE/panes_$4"; else printf '%s' '{"result":{"panes":[]}}'; fi ;;
+"pane split")
+	if [ -e "$STATE/split_unsupported" ]; then echo "unknown command: split" >&2; exit 2; fi
+	if [ -e "$STATE/split_gone" ]; then
+		rm -f "$STATE/split_gone"
+		echo '{"error":{"code":"pane_not_found","message":"pane not found"}}' >&2
+		exit 1
+	fi
+	printf '{"result":{"pane":{"pane_id":"%s:p8"}}}' "${3%%:*}" ;;
+"pane rename")
+	if [ -e "$STATE/rename_unsupported" ]; then echo "unknown command: rename" >&2; exit 2; fi
+	printf '%s' '{"result":{}}' ;;
 "agent start") printf '{"result":{"agent":{"name":"%s","pane_id":"%s"}}}' "$3" "$7" ;;
 "agent get") printf '%s' '{"error":{"code":"agent_not_found","message":"agent target not found"}}' ;;
 "agent list") printf '%s' '{"result":{"agents":[]}}' ;;

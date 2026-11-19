@@ -1150,6 +1150,11 @@ func (c *client) getAgent(ctx context.Context, target string) (agentInfo, bool, 
 // after the agent's tab exists; Stop closing the agent's pane then removes the
 // workspace and leaves the checkout on disk. A herdr without `worktree`, or
 // one that refuses the open, falls back to the tab placement.
+//
+// A session whose env sets GC_HERDR_PANE_GROUP is placed as a split pane of
+// the tab that variable names in the rig workspace (ensureGroupPlacement),
+// ahead of the worktree placement. The pane is labeled with the session's tab
+// label, which is how a restart finds and closes its stale pane.
 
 type workspaceInfo struct {
 	WorkspaceID string `json:"workspace_id"`
@@ -1522,6 +1527,159 @@ func (c *client) addLabeledTab(ctx context.Context, wsID, label, cwd string, env
 		return nil, "", "", err
 	}
 	return stale, tabID, paneID, nil
+}
+
+// paneEntry is one pane of a `pane list` reply.
+type paneEntry struct {
+	PaneID string `json:"pane_id"`
+	TabID  string `json:"tab_id"`
+	Label  string `json:"label"`
+}
+
+// listPanes returns the panes in wsID, in herdr's order.
+func (c *client) listPanes(ctx context.Context, wsID string) ([]paneEntry, error) {
+	res, err := c.run(ctx, "pane", "list", "--workspace", wsID)
+	if err != nil {
+		return nil, err
+	}
+	var wrap struct {
+		Panes []paneEntry `json:"panes"`
+	}
+	if err := json.Unmarshal(res, &wrap); err != nil {
+		return nil, fmt.Errorf("herdr pane list: decode: %w", err)
+	}
+	return wrap.Panes, nil
+}
+
+// paneSplit splits anchor downward without focus and returns the new shell
+// pane, created with cwd and env exactly as tabCreate creates a tab's pane.
+func (c *client) paneSplit(ctx context.Context, anchor, cwd string, env map[string]string) (paneEntry, error) {
+	args := []string{"pane", "split", anchor, "--direction", "down", "--no-focus"}
+	if cwd != "" {
+		args = append(args, "--cwd", cwd)
+	}
+	for k, v := range env {
+		args = append(args, "--env", k+"="+v)
+	}
+	res, err := c.run(ctx, args...)
+	if err != nil {
+		return paneEntry{}, err
+	}
+	var wrap struct {
+		Pane paneEntry `json:"pane"`
+	}
+	if err := json.Unmarshal(res, &wrap); err != nil {
+		return paneEntry{}, fmt.Errorf("herdr pane split: decode: %w", err)
+	}
+	if wrap.Pane.PaneID == "" {
+		return paneEntry{}, fmt.Errorf("herdr pane split %q: reply names no pane", anchor)
+	}
+	return wrap.Pane, nil
+}
+
+// paneRename labels a pane.
+func (c *client) paneRename(ctx context.Context, paneID, label string) error {
+	_, err := c.run(ctx, "pane", "rename", paneID, label)
+	return err
+}
+
+// ensureGroupPlacement places an agent as a split pane of the tab labeled
+// group in the workspace wsLabel and returns the workspace, that tab, and the
+// agent's fresh shell pane, created with cwd and env exactly as a tab's pane.
+// A new workspace's default tab becomes the group tab, a missing group tab is
+// created, and an existing one has its last pane split downward. The agent's
+// pane is labeled paneLabel; stale panes of that label in the group tab and
+// stale tabs of that label elsewhere in the workspace (earlier lives of the
+// session) are closed best-effort only after the new pane exists, because herdr
+// closes a tab when its last pane closes. When the pane cannot be labeled it is
+// closed and the error returned: stale cleanup depends on the label.
+func (c *client) ensureGroupPlacement(ctx context.Context, wsLabel, group, paneLabel, cwd string, env map[string]string) (agentInfo, error) {
+	wsID, err := c.findWorkspace(ctx, wsLabel)
+	if err != nil {
+		return agentInfo{}, err
+	}
+	if wsID == "" {
+		ws, tabID, paneID, err := c.workspaceCreateWithID(ctx, wsLabel, cwd, env)
+		if err != nil {
+			return agentInfo{}, err
+		}
+		info := agentInfo{WorkspaceID: ws, TabID: tabID, PaneID: paneID}
+		if err := c.tabRename(ctx, tabID, group); err != nil {
+			_ = c.closePane(ctx, paneID) // best-effort: removes the workspace this call made
+			return agentInfo{}, err
+		}
+		return info, c.labelGroupPane(ctx, info, paneLabel)
+	}
+	info, tabs, panes, err := c.addGroupPane(ctx, wsID, group, cwd, env)
+	if herdrCodeAnyShape(err) == "pane_not_found" {
+		// The anchor closed between the list and the split: list again, once.
+		info, tabs, panes, err = c.addGroupPane(ctx, wsID, group, cwd, env)
+	}
+	if err != nil {
+		return agentInfo{}, err
+	}
+	if err := c.labelGroupPane(ctx, info, paneLabel); err != nil {
+		return agentInfo{}, err
+	}
+	for _, pn := range panes {
+		if pn.TabID == info.TabID && pn.Label == paneLabel && pn.PaneID != info.PaneID {
+			_ = c.closePane(ctx, pn.PaneID) // best-effort: a stale life of this session
+		}
+	}
+	for _, tb := range tabs {
+		if tb.Label == paneLabel && tb.TabID != info.TabID {
+			_ = c.tabClose(ctx, tb.TabID) // best-effort: a tab-placed life of this session
+		}
+	}
+	return info, nil
+}
+
+// addGroupPane creates the agent's pane in wsID's group tab: the root pane of
+// a new group tab, or a split of the group tab's last pane. It returns the
+// tabs and the group tab's panes as they were before the pane was added.
+func (c *client) addGroupPane(ctx context.Context, wsID, group, cwd string, env map[string]string) (info agentInfo, tabs []tabInfo, panes []paneEntry, err error) {
+	if tabs, err = c.listTabs(ctx, wsID); err != nil {
+		return agentInfo{}, nil, nil, err
+	}
+	groupTab := ""
+	for _, tb := range tabs {
+		if tb.Label == group {
+			groupTab = tb.TabID
+			break
+		}
+	}
+	if groupTab != "" {
+		all, err := c.listPanes(ctx, wsID)
+		if err != nil {
+			return agentInfo{}, nil, nil, err
+		}
+		for _, pn := range all {
+			if pn.TabID == groupTab {
+				panes = append(panes, pn)
+			}
+		}
+	}
+	if len(panes) == 0 {
+		tabID, paneID, err := c.tabCreate(ctx, wsID, group, cwd, env)
+		if err != nil {
+			return agentInfo{}, nil, nil, err
+		}
+		return agentInfo{WorkspaceID: wsID, TabID: tabID, PaneID: paneID}, tabs, nil, nil
+	}
+	pn, err := c.paneSplit(ctx, panes[len(panes)-1].PaneID, cwd, env)
+	if err != nil {
+		return agentInfo{}, nil, nil, err
+	}
+	return agentInfo{WorkspaceID: wsID, TabID: groupTab, PaneID: pn.PaneID}, tabs, panes, nil
+}
+
+// labelGroupPane labels the agent's pane, closing it when herdr refuses.
+func (c *client) labelGroupPane(ctx context.Context, info agentInfo, paneLabel string) error {
+	if err := c.paneRename(ctx, info.PaneID, paneLabel); err != nil {
+		_ = c.closePane(ctx, info.PaneID) // best-effort: an unlabeled pane would never be cleaned up
+		return err
+	}
+	return nil
 }
 
 // ── shared session-server lifecycle ──────────────────────────────────────────
