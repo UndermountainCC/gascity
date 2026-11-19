@@ -73,6 +73,24 @@ exhaustion; bead az-405 has the full evidence trail). The adapter was rewritten 
   last tab closes, so the root tab and stale same-label tabs close only AFTER the
   agent tab exists. Any herdr failure falls back to `ensurePlacement` with one
   `herdr: worktree placement … unavailable, using tab` stderr line.
+- **Pane groups** (`ensureGroupPlacement`, opt-in): a session whose env sets
+  `GC_HERDR_PANE_GROUP=<label>` (an agent's `env`, or `[[patches.agent]]` for a
+  pack agent such as a control dispatcher; no config schema) becomes a split pane
+  of the tab `<label>` in its rig workspace instead of getting its own tab. It
+  takes precedence over worktree placement; the pane's cwd is still the work dir.
+  A new workspace's default tab becomes the group tab, a missing group tab is
+  created with `tab create`, otherwise the group tab's last pane is split with
+  `pane split <anchor> --direction down --no-focus --cwd --env` (a `pane_not_found`
+  on a vanished anchor re-lists once). The new pane is labeled with the session's
+  tab label (`pane rename`); only then are same-label panes in the group tab and
+  same-label tabs elsewhere in the workspace (earlier lives) closed. The binding
+  records the workspace, the group tab and the pane, so liveness, Peek, Nudge and
+  Stop (`pane close`) are unchanged. Verified on herdr 0.9.5: closing a tab's last
+  pane closes the tab, and pane ids and labels survive a server restart's layout
+  restore. Adoption closes the surplus placed pane, never its tab, so a shared tab
+  survives. Any herdr failure (no `pane split`/`pane rename`, say) closes an
+  unlabeled new pane and falls back to `ensurePlacement` with one
+  `herdr: pane group … unavailable, using tab` stderr line.
 - **Names** (`agentname.go`): `herdrAgentName` maps gc names deterministically
   (lowercase, charmap to `-`, 24-char head + fnv32 hash beyond 32). The sidecar's
   exact-name record is the reverse map; `ListRunning` enumerates bound sessions first

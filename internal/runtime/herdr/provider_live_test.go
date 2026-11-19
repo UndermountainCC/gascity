@@ -2,11 +2,13 @@ package herdr
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/runtime/herdr/herdrtest"
 )
 
 // TestProviderLive drives the herdr Provider against a real herdr binary in an
@@ -87,4 +89,79 @@ func TestProviderLive(t *testing.T) {
 	if p.IsRunning("smoke") {
 		t.Error("IsRunning = true after Stop")
 	}
+}
+
+// TestProviderLivePaneGroup pins GC_HERDR_PANE_GROUP against a real herdr:
+// two grouped sessions share one tab as two panes, and stopping both leaves
+// no group tab behind (herdr closes a tab whose last pane closes).
+func TestProviderLivePaneGroup(t *testing.T) {
+	requireLiveHerdr(t)
+
+	const town, group = "gctest-live-group", "gctest-group"
+	names := []string{"grp-a", "grp-b"}
+	p := New(town, t.TempDir(), t.TempDir(), 0, 0)
+	for _, n := range names {
+		_ = p.Stop(n) // clear any leftover from a crashed prior run
+	}
+	t.Cleanup(func() {
+		for _, n := range names {
+			_ = p.Stop(n)
+		}
+		_ = p.TeardownServer()
+	})
+
+	ctx := context.Background()
+	for _, n := range names {
+		cfg := runtime.Config{
+			WorkDir: t.TempDir(),
+			Command: liveTickCommand,
+			Env:     map[string]string{"GC_SESSION_ID": "gctest-" + n, envPaneGroup: group},
+		}
+		if err := p.Start(ctx, n, cfg); err != nil {
+			t.Fatalf("Start %s: %v", n, err)
+		}
+	}
+	groupPanes := func() (tabs int, panes []paneEntry) {
+		t.Helper()
+		ws, err := p.c.findWorkspace(ctx, town)
+		if err != nil || ws == "" {
+			return 0, nil
+		}
+		all, err := p.c.listTabs(ctx, ws)
+		if err != nil {
+			t.Fatalf("tab list: %v", err)
+		}
+		var groupTab string
+		for _, tb := range all {
+			if tb.Label == group {
+				tabs++
+				groupTab = tb.TabID
+			}
+		}
+		listed, err := p.c.listPanes(ctx, ws)
+		if err != nil {
+			t.Fatalf("pane list: %v", err)
+		}
+		for _, pn := range listed {
+			if pn.TabID == groupTab {
+				panes = append(panes, pn)
+			}
+		}
+		return tabs, panes
+	}
+	if tabs, panes := groupPanes(); tabs != 1 || len(panes) != 2 || panes[0].Label == panes[1].Label {
+		t.Fatalf("group tabs = %d, panes = %+v; want one tab holding grp-a and grp-b", tabs, panes)
+	}
+	for _, n := range names {
+		if !p.IsRunning(n) {
+			t.Errorf("IsRunning(%s) = false after Start", n)
+		}
+		if err := p.Stop(n); err != nil {
+			t.Fatalf("Stop %s: %v", n, err)
+		}
+	}
+	herdrtest.Poll(t, "the group tab closing", 5*time.Second, func() (bool, string) {
+		tabs, panes := groupPanes()
+		return tabs == 0, fmt.Sprintf("%d group tabs, panes %+v", tabs, panes)
+	})
 }
