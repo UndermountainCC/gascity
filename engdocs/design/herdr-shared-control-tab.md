@@ -1,6 +1,6 @@
 # herdr: grouping non-LLM sessions as panes of one shared tab
 
-Status: design only, no code. Scope: `internal/runtime/herdr`.
+Status: implemented (`ensureGroupPlacement`). Scope: `internal/runtime/herdr`.
 
 Problem: the herdr provider gives every session its own tab. Non-LLM
 sessions such as `core.control-dispatcher` (a `gc convoy control --serve`
