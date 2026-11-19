@@ -244,7 +244,32 @@ func (s fakeHerdrSpec) worktree(argv []string, stdout, stderr io.Writer) int {
 		if has("tab_create_error_" + ws) {
 			return fail(`{"error":{"code":"workspace_not_found","message":"workspace not found"}}`+"\n", 1)
 		}
+		if has("record_tabs") {
+			_ = os.WriteFile(flag("tabs_"+ws), []byte(`{"result":{"tabs":[{"tab_id":"`+ws+`:t9","label":"`+positional(argv, 5)+`"}]}}`), 0o644)
+			_ = os.WriteFile(flag("panes_"+ws), []byte(`{"result":{"panes":[{"pane_id":"`+ws+`:p9","tab_id":"`+ws+`:t9"}]}}`), 0o644)
+		}
 		out(`{"result":{"tab":{"tab_id":"` + ws + `:t9"},"root_pane":{"pane_id":"` + ws + `:p9"}}}`)
+	case "pane list":
+		if ws := positional(argv, 3); has("panes_" + ws) {
+			out(read("panes_" + ws))
+		} else {
+			out(`{"result":{"panes":[]}}`)
+		}
+	case "pane split":
+		if has("split_unsupported") {
+			return fail("unknown command: split\n", 2)
+		}
+		if has("split_gone") {
+			_ = os.Remove(flag("split_gone"))
+			return fail(`{"error":{"code":"pane_not_found","message":"pane not found"}}`+"\n", 1)
+		}
+		ws, _, _ := strings.Cut(positional(argv, 2), ":")
+		out(`{"result":{"pane":{"pane_id":"` + ws + `:p8"}}}`)
+	case "pane rename":
+		if has("rename_unsupported") {
+			return fail("unknown command: rename\n", 2)
+		}
+		out(`{"result":{}}`)
 	case "agent start":
 		out(`{"result":{"agent":{"name":"` + positional(argv, 2) + `","pane_id":"` + positional(argv, 6) + `"}}}`)
 	case "agent get":
