@@ -20,7 +20,9 @@ import (
 // Provider implements runtime.Provider (and ServerLifecycleProvider) backed by
 // herdr. Model: one shared herdr session (server) per city; within it, one
 // workspace per rig (or per town) and one tab per agent, so each gascity session
-// is its own switchable "space" rather than a tiled pane. Agents are addressable
+// is its own switchable "space" rather than a tiled pane. A session whose work
+// dir is a linked git worktree gets that worktree's herdr workspace, grouped
+// under its rig workspace, instead of a rig tab. Agents are addressable
 // by name, 1:1 with gascity session names. Opt-in via the "herdr" runtime
 // selector; tmux default. See herdr-provider-design.md.
 type Provider struct {
@@ -87,8 +89,9 @@ func (p *Provider) TeardownServer() error { return p.c.stopServer() }
 
 // Start ensures the shared server is up, prepares the session's working
 // directory (overlay/CopyFiles staging + pre_start), spawns the agent into its
-// placed workspace/tab, accepts its startup dialogs, runs session_setup, and
-// delivers the startup nudge once the agent reaches idle.
+// placed workspace/tab (a tab of its rig workspace, or a tab of its linked git
+// worktree's herdr worktree workspace), accepts its startup dialogs, runs
+// session_setup, and delivers the startup nudge once the agent reaches idle.
 func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) error {
 	if err := p.ConfigureServer(); err != nil {
 		return fmt.Errorf("herdr: configure server: %w", err)
@@ -129,21 +132,22 @@ func (p *Provider) start(ctx context.Context, name string, cfg runtime.Config) e
 	if err != nil {
 		return fmt.Errorf("herdr: start %q: %w", name, err)
 	}
-	// Place the agent in its own tab under a per-rig (per-town) workspace, so
-	// agents are separate switchable spaces rather than tiled panes. The
+	// Place the agent in its own tab under a per-rig (per-town) workspace, or,
+	// when its work dir is in a linked git worktree, in that worktree's herdr
+	// workspace grouped under the rig workspace (see place). Either way agents
+	// are separate switchable spaces rather than tiled panes. The
 	// find-or-create is serialized so concurrent same-rig Starts share one
 	// workspace instead of racing to create duplicates. Under herdr ≥0.7.5 the
 	// tab's root shell pane — created here with the agent's cwd and env — IS
 	// the agent's pane.
 	wsLabel, tabLabel := placementFor(name, p.c.session, cfg.Env)
 	p.mu.Lock()
-	tabID, paneID, err := p.c.ensurePlacement(ctx, wsLabel, tabLabel, workDir, cfg.Env)
+	info, err := p.place(ctx, name, wsLabel, tabLabel, workDir, cfg.Env)
 	p.mu.Unlock()
 	if err != nil {
 		return fmt.Errorf("herdr: place %q: %w", name, err)
 	}
 	spec := launchSpecFor(cfg.Command)
-	info := agentInfo{PaneID: paneID, TabID: tabID}
 	mode := bindModeShell
 	if spec.Kind != "" {
 		mode = bindModeAgent
@@ -204,6 +208,55 @@ func (p *Provider) start(ctx context.Context, name string, cfg runtime.Config) e
 		return nil
 	}
 	return p.launchOrchestration(ctx, name, cfg, launchedPane{paneID: info.PaneID, workDir: workDir, mode: mode}, startupText)
+}
+
+// place returns the workspace, tab, and fresh shell pane the agent launches
+// into. A work dir inside a linked git worktree goes to that worktree's herdr
+// workspace (client.ensureWorktreePlacement); every other session, and a
+// worktree session herdr cannot place that way, gets a tab in the rig
+// workspace (client.ensurePlacement). The fallback writes one diagnostic
+// unless herdr merely reports the work dir is not in a linked worktree. The
+// caller holds p.mu.
+func (p *Provider) place(ctx context.Context, name, wsLabel, tabLabel, workDir string, env map[string]string) (agentInfo, error) {
+	if linkedWorktreeCandidate(workDir) {
+		info, err := p.c.ensureWorktreePlacement(ctx, wsLabel, tabLabel, workDir, env)
+		if err == nil {
+			return info, nil
+		}
+		if !errors.Is(err, errNotLinkedWorktree) {
+			fmt.Fprintf(os.Stderr, "herdr: worktree placement for %q unavailable, using tab: %v\n", name, err) //nolint:errcheck // best-effort diagnostic
+		}
+	}
+	tabID, paneID, err := p.c.ensurePlacement(ctx, wsLabel, tabLabel, workDir, env)
+	return agentInfo{TabID: tabID, PaneID: paneID}, err
+}
+
+// linkedWorktreeCandidate reports whether workDir may be inside a linked git
+// worktree: the nearest .git above it is a file (`gitdir: …`), as `git
+// worktree add` leaves it, rather than a primary checkout's directory. A
+// submodule's .git is a file too; herdr's worktree list tells the two apart.
+// Every other work dir — empty, outside git, a primary checkout, or one whose
+// .git cannot be read — fails the check, so its Start makes no herdr worktree
+// call.
+func linkedWorktreeCandidate(workDir string) bool {
+	if workDir == "" {
+		return false
+	}
+	dir := filepath.Clean(workDir)
+	for {
+		fi, err := os.Lstat(filepath.Join(dir, ".git"))
+		if err == nil {
+			return fi.Mode().IsRegular()
+		}
+		if !errors.Is(err, os.ErrNotExist) {
+			return false
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return false
+		}
+		dir = parent
+	}
 }
 
 // launchCommand runs the session's command in its placed pane and returns

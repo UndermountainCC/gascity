@@ -1139,6 +1139,17 @@ func (c *client) getAgent(ctx context.Context, target string) (agentInfo, bool, 
 // agents launch into an existing shell pane, and cwd/env are set here at pane
 // creation (there is no longer a stray pane to close, which is what leaked one
 // shell per wrongful Start in the spawn storm).
+//
+// A session whose work dir is inside a linked git worktree is placed in a herdr
+// worktree workspace instead (ensureWorktreePlacement): `worktree open` opens
+// the checkout as its own workspace, grouped under the rig workspace and
+// labeled with the session's tab label, and the agent's pane is a `tab create`
+// tab inside it, so it gets the same cwd/env as the tab placement. herdr
+// removes a worktree workspace when its last tab closes, so the root tab
+// `worktree open` spawns, and any stale tab of the same label, is closed only
+// after the agent's tab exists; Stop closing the agent's pane then removes the
+// workspace and leaves the checkout on disk. A herdr without `worktree`, or
+// one that refuses the open, falls back to the tab placement.
 
 type workspaceInfo struct {
 	WorkspaceID string `json:"workspace_id"`
@@ -1172,10 +1183,16 @@ func (c *client) findWorkspace(ctx context.Context, label string) (string, error
 
 // workspaceCreate makes a workspace labeled label whose root shell pane is
 // created with the given cwd and env, and returns the default tab and root pane
-// (the agent's pane) herdr auto-spawns inside it. The workspace id itself is not
-// returned: callers address the agent by tab and pane, and resolveWorkspace
-// looks the id up by label when it needs one.
+// (the agent's pane) herdr auto-spawns inside it. Callers that need the new
+// workspace's id use workspaceCreateWithID.
 func (c *client) workspaceCreate(ctx context.Context, label, cwd string, env map[string]string) (tabID, paneID string, err error) {
+	_, tabID, paneID, err = c.workspaceCreateWithID(ctx, label, cwd, env)
+	return tabID, paneID, err
+}
+
+// workspaceCreateWithID is workspaceCreate that also returns the new
+// workspace's id.
+func (c *client) workspaceCreateWithID(ctx context.Context, label, cwd string, env map[string]string) (wsID, tabID, paneID string, err error) {
 	args := []string{"workspace", "create", "--label", label, "--no-focus"}
 	if cwd != "" {
 		args = append(args, "--cwd", cwd)
@@ -1185,9 +1202,12 @@ func (c *client) workspaceCreate(ctx context.Context, label, cwd string, env map
 	}
 	res, err := c.run(ctx, args...)
 	if err != nil {
-		return "", "", err
+		return "", "", "", err
 	}
 	var wrap struct {
+		Workspace struct {
+			WorkspaceID string `json:"workspace_id"`
+		} `json:"workspace"`
 		Tab struct {
 			TabID string `json:"tab_id"`
 		} `json:"tab"`
@@ -1196,9 +1216,9 @@ func (c *client) workspaceCreate(ctx context.Context, label, cwd string, env map
 		} `json:"root_pane"`
 	}
 	if err := json.Unmarshal(res, &wrap); err != nil {
-		return "", "", fmt.Errorf("herdr workspace create: decode: %w", err)
+		return "", "", "", fmt.Errorf("herdr workspace create: decode: %w", err)
 	}
-	return wrap.Tab.TabID, wrap.RootPane.PaneID, nil
+	return wrap.Workspace.WorkspaceID, wrap.Tab.TabID, wrap.RootPane.PaneID, nil
 }
 
 // listTabs returns the tabs in wsID.
@@ -1290,6 +1310,218 @@ func (c *client) ensurePlacement(ctx context.Context, wsLabel, tabLabel, cwd str
 		}
 	}
 	return c.tabCreate(ctx, wsID, tabLabel, cwd, env)
+}
+
+// errNotLinkedWorktree is ensureWorktreePlacement's answer for a work dir herdr
+// does not list inside a linked git worktree (a submodule's .git file, say).
+// Start places such a session in a tab without a diagnostic.
+var errNotLinkedWorktree = errors.New("work dir is not in a linked git worktree")
+
+// worktreeSource is the repository `herdr worktree list` reports worktrees of.
+type worktreeSource struct {
+	RepoRoot string `json:"repo_root"`
+}
+
+// worktreeEntry is one checkout of that repository: the primary checkout or a
+// linked worktree, with the workspace herdr has open for it, if any.
+type worktreeEntry struct {
+	Path             string `json:"path"`
+	IsLinkedWorktree bool   `json:"is_linked_worktree"`
+	OpenWorkspaceID  string `json:"open_workspace_id"`
+}
+
+// worktreeList → `herdr worktree list --cwd <cwd>` (herdr ≥0.9): the
+// repository cwd is in and every checkout of it, the primary one included.
+func (c *client) worktreeList(ctx context.Context, cwd string) (worktreeSource, []worktreeEntry, error) {
+	res, err := c.run(ctx, "worktree", "list", "--cwd", cwd)
+	if err != nil {
+		return worktreeSource{}, nil, err
+	}
+	var wrap struct {
+		Source    worktreeSource  `json:"source"`
+		Worktrees []worktreeEntry `json:"worktrees"`
+	}
+	if err := json.Unmarshal(res, &wrap); err != nil {
+		return worktreeSource{}, nil, fmt.Errorf("herdr worktree list: decode: %w", err)
+	}
+	return wrap.Source, wrap.Worktrees, nil
+}
+
+// worktreeOpen → `herdr worktree open --workspace <sourceWS> --path <path>
+// --label <label> --no-focus`: opens an existing checkout as a workspace
+// grouped under sourceWS and returns it with the root tab herdr spawned in it.
+// alreadyOpen reports that herdr reused a workspace it had open for path, in
+// which case rootTabID is that workspace's active tab — possibly a live
+// agent's, so never the new agent's pane. It never creates the checkout, never
+// trusts the repository on the operator's behalf, and never takes focus.
+func (c *client) worktreeOpen(ctx context.Context, sourceWS, path, label string) (wsID, rootTabID string, alreadyOpen bool, err error) {
+	res, err := c.run(ctx, "worktree", "open", "--workspace", sourceWS, "--path", path, "--label", label, "--no-focus")
+	if err != nil {
+		return "", "", false, err
+	}
+	var wrap struct {
+		AlreadyOpen bool `json:"already_open"`
+		Workspace   struct {
+			WorkspaceID string `json:"workspace_id"`
+		} `json:"workspace"`
+		Tab struct {
+			TabID string `json:"tab_id"`
+		} `json:"tab"`
+	}
+	if err := json.Unmarshal(res, &wrap); err != nil {
+		return "", "", false, fmt.Errorf("herdr worktree open: decode: %w", err)
+	}
+	if wrap.Workspace.WorkspaceID == "" {
+		return "", "", false, fmt.Errorf("herdr worktree open %q: reply names no workspace", path)
+	}
+	return wrap.Workspace.WorkspaceID, wrap.Tab.TabID, wrap.AlreadyOpen, nil
+}
+
+// matchWorktree returns the linked worktree that contains workDir. herdr lists
+// the primary checkout too, and its path contains every worktree nested under
+// it, so the entry with the longest containing path wins; workDir matches only
+// when that entry is a linked worktree. Both sides are compared with symlinks
+// resolved.
+func matchWorktree(entries []worktreeEntry, workDir string) (worktreeEntry, bool) {
+	dir := realPath(workDir)
+	var best worktreeEntry
+	bestLen := -1
+	for _, e := range entries {
+		p := realPath(e.Path)
+		if p == "" || (dir != p && !strings.HasPrefix(dir, p+string(filepath.Separator))) {
+			continue
+		}
+		if len(p) > bestLen {
+			best, bestLen = e, len(p)
+		}
+	}
+	if bestLen < 0 || !best.IsLinkedWorktree {
+		return worktreeEntry{}, false
+	}
+	return best, true
+}
+
+// realPath cleans p and resolves its symlinks. A path that cannot be resolved
+// (one herdr lists for a pruned checkout, say) is compared as written.
+func realPath(p string) string {
+	if p == "" {
+		return ""
+	}
+	if resolved, err := filepath.EvalSymlinks(p); err == nil {
+		return resolved
+	}
+	return filepath.Clean(p)
+}
+
+// ensureWorktreePlacement places an agent whose work dir is inside a linked
+// git worktree in that worktree's herdr workspace and returns the agent's
+// workspace, tab, and fresh shell pane. The rig workspace wsLabel (created at
+// the repository root when missing) is the source the worktree workspace is
+// grouped under; the worktree workspace is reused when herdr already has one
+// open for the checkout, and otherwise opened with the label tabLabel. The
+// agent's pane is a new tab labeled tabLabel inside it, created with cwd and
+// env exactly as ensurePlacement creates one.
+//
+// The root tab a fresh `worktree open` spawned, stale tabs labeled tabLabel in
+// the worktree workspace, and stale tabs labeled tabLabel left in an existing
+// rig workspace by a tab-placed life of the session are closed best-effort
+// once the agent's tab exists, never before: herdr removes a worktree
+// workspace when its last tab closes. When the agent's tab cannot be created,
+// a workspace this call opened is closed through its root tab before the
+// error is returned, so the tab fallback leaves no empty workspace behind.
+//
+// It returns errNotLinkedWorktree when herdr does not list workDir inside a
+// linked worktree, and herdr's error when it cannot list or open worktrees.
+func (c *client) ensureWorktreePlacement(ctx context.Context, wsLabel, tabLabel, workDir string, env map[string]string) (agentInfo, error) {
+	src, entries, err := c.worktreeList(ctx, workDir)
+	if err != nil {
+		return agentInfo{}, err
+	}
+	wt, ok := matchWorktree(entries, workDir)
+	if !ok {
+		return agentInfo{}, errNotLinkedWorktree
+	}
+	rigWS, err := c.findWorkspace(ctx, wsLabel)
+	if err != nil {
+		return agentInfo{}, err
+	}
+	rigExisted := rigWS != ""
+	if !rigExisted {
+		// The rig workspace's own shell is not an agent's pane: no agent env.
+		if rigWS, _, _, err = c.workspaceCreateWithID(ctx, wsLabel, src.RepoRoot, nil); err != nil {
+			return agentInfo{}, err
+		}
+		if rigWS == "" {
+			return agentInfo{}, fmt.Errorf("herdr workspace create %q: reply names no workspace", wsLabel)
+		}
+	}
+	var wtWS, rootTab string
+	fresh := false
+	open := func() error {
+		ws, root, already, err := c.worktreeOpen(ctx, rigWS, wt.Path, tabLabel)
+		if err != nil {
+			return err
+		}
+		wtWS, rootTab, fresh = ws, root, !already
+		return nil
+	}
+	if wt.OpenWorkspaceID != "" {
+		wtWS = wt.OpenWorkspaceID
+	} else if err := open(); err != nil {
+		return agentInfo{}, err
+	}
+	stale, tabID, paneID, err := c.addLabeledTab(ctx, wtWS, tabLabel, workDir, env)
+	if err != nil && wt.OpenWorkspaceID != "" && herdrCodeAnyShape(err) == "workspace_not_found" {
+		// The workspace herdr listed as open closed before it was used (its
+		// last tab closing, say): open the worktree again, once.
+		if err = open(); err == nil {
+			stale, tabID, paneID, err = c.addLabeledTab(ctx, wtWS, tabLabel, workDir, env)
+		}
+	}
+	if err != nil {
+		if fresh && rootTab != "" {
+			_ = c.tabClose(ctx, rootTab) // best-effort: removes the workspace this call opened
+		}
+		return agentInfo{}, err
+	}
+	for _, tb := range stale {
+		if tb != rootTab {
+			_ = c.tabClose(ctx, tb) // best-effort, as in ensurePlacement
+		}
+	}
+	if fresh && rootTab != "" {
+		_ = c.tabClose(ctx, rootTab) // best-effort: the agent's tab replaces it
+	}
+	if rigExisted {
+		if tabs, lerr := c.listTabs(ctx, rigWS); lerr == nil {
+			for _, tb := range tabs {
+				if tb.Label == tabLabel {
+					_ = c.tabClose(ctx, tb.TabID) // best-effort, as in ensurePlacement
+				}
+			}
+		}
+	}
+	return agentInfo{WorkspaceID: wtWS, TabID: tabID, PaneID: paneID}, nil
+}
+
+// addLabeledTab creates a tab labeled label in wsID with cwd and env baked
+// into its pane, and returns the ids of the tabs that already carried that
+// label for the caller to close once the new tab exists.
+func (c *client) addLabeledTab(ctx context.Context, wsID, label, cwd string, env map[string]string) (stale []string, tabID, paneID string, err error) {
+	tabs, err := c.listTabs(ctx, wsID)
+	if err != nil {
+		return nil, "", "", err
+	}
+	for _, tb := range tabs {
+		if tb.Label == label {
+			stale = append(stale, tb.TabID)
+		}
+	}
+	tabID, paneID, err = c.tabCreate(ctx, wsID, label, cwd, env)
+	if err != nil {
+		return nil, "", "", err
+	}
+	return stale, tabID, paneID, nil
 }
 
 // ── shared session-server lifecycle ──────────────────────────────────────────
