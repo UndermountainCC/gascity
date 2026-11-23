@@ -279,3 +279,107 @@ func TestCreateBudgetConcurrentRefundsRemainClaimable(t *testing.T) {
 		t.Fatal("claim after all refunds were reused = true, want false")
 	}
 }
+
+func TestCreateBudgetServesDeferredTemplateFirstForEverySeed(t *testing.T) {
+	demands := []Demand{
+		{Template: "alpha", FreshCreates: 3},
+		{Template: "bravo", FreshCreates: 3},
+		{Template: "sre", FreshCreates: 1, Deferred: 1},
+	}
+	for seed := uint64(0); seed < uint64(len(demands)); seed++ {
+		budget := NewCreateBudget(1)
+		budget.ConfigureFairShare(demands, seed)
+		if !budget.TryClaim("sre") {
+			t.Fatalf("seed %d: deferred sre claim = false, want its token ahead of fresh demand", seed)
+		}
+		if budget.TryClaim("alpha") || budget.TryClaim("bravo") {
+			t.Fatalf("seed %d: fresh template claimed past max limit 1", seed)
+		}
+	}
+}
+
+func TestCreateBudgetServesMostDeferredTemplateFirst(t *testing.T) {
+	demands := []Demand{
+		{Template: "alpha", FreshCreates: 1, Deferred: 1},
+		{Template: "bravo", FreshCreates: 1, Deferred: 4},
+		{Template: "charlie", FreshCreates: 1, Deferred: 2},
+	}
+	for seed := uint64(0); seed < uint64(len(demands)); seed++ {
+		budget := NewCreateBudget(2)
+		budget.ConfigureFairShare(demands, seed)
+		if !budget.TryClaim("bravo") || !budget.TryClaim("charlie") {
+			t.Fatalf("seed %d: the two most-deferred templates did not both get a token", seed)
+		}
+		if budget.TryClaim("alpha") {
+			t.Fatalf("seed %d: least-deferred alpha claimed past the limit", seed)
+		}
+	}
+}
+
+func TestCreateBudgetDeferredTemplateGoesAheadOfFloors(t *testing.T) {
+	budget := NewCreateBudget(2)
+	budget.ConfigureFairShare([]Demand{
+		{Template: "floor-a", FreshCreates: 1, HasFloor: true},
+		{Template: "floor-b", FreshCreates: 1, HasFloor: true},
+		{Template: "sre", FreshCreates: 1, Deferred: 3},
+	}, 0)
+	if !budget.TryClaim("sre") {
+		t.Fatal("deferred sre claim = false, want its token ahead of floor reservations")
+	}
+	if !budget.TryClaim("floor-a") {
+		t.Fatal("floor-a claim = false, want the remaining token for the first floor in rotation")
+	}
+	if budget.TryClaim("floor-b") {
+		t.Fatal("floor-b claim = true, want false once deferred and floor tokens spend the limit")
+	}
+}
+
+func TestCreateBudgetDeferredTokensNeverExceedLimit(t *testing.T) {
+	budget := NewCreateBudget(2)
+	budget.ConfigureFairShare([]Demand{
+		{Template: "alpha", FreshCreates: 2, Deferred: 1},
+		{Template: "bravo", FreshCreates: 2, Deferred: 1},
+		{Template: "charlie", FreshCreates: 2, Deferred: 1},
+	}, 0)
+	claimed := 0
+	for _, template := range []string{"alpha", "alpha", "bravo", "bravo", "charlie", "charlie"} {
+		if budget.TryClaim(template) {
+			claimed++
+		}
+	}
+	if claimed != 2 {
+		t.Fatalf("claimed = %d, want limit 2 with three deferred templates", claimed)
+	}
+}
+
+func TestFairSharesWithoutDeferralMatchPriorPolicy(t *testing.T) {
+	// Expected shares are what the policy produced before Deferred existed,
+	// recorded from upstream main 97c0c9b3b for these inputs.
+	demands := []Demand{
+		{Template: "alpha", FreshCreates: 3, HasFloor: true},
+		{Template: "bravo", FreshCreates: 2},
+		{Template: "charlie", FreshCreates: 4, HasFloor: true},
+		{Template: "delta", FreshCreates: 1},
+	}
+	type key struct {
+		limit int
+		seed  uint64
+	}
+	want := map[key][4]int{
+		{3, 0}: {2, 0, 1, 0},
+		{3, 1}: {1, 1, 1, 0},
+		{3, 2}: {1, 0, 2, 0},
+		{3, 3}: {1, 0, 1, 1},
+		{6, 0}: {2, 2, 2, 0},
+		{6, 1}: {1, 2, 2, 1},
+		{6, 2}: {2, 1, 2, 1},
+		{6, 3}: {2, 1, 2, 1},
+	}
+	for k, expected := range want {
+		shares, spare := fairShares(demands, k.limit, k.seed)
+		got := [4]int{shares["alpha"], shares["bravo"], shares["charlie"], shares["delta"]}
+		if got != expected || spare != 0 {
+			t.Fatalf("limit %d seed %d: shares (alpha, bravo, charlie, delta) = %v spare %d, want %v spare 0", k.limit, k.seed, got, spare, expected)
+		}
+	}
+}
