@@ -25,7 +25,9 @@ import (
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionauto "github.com/gastownhall/gascity/internal/runtime/auto"
 	"github.com/gastownhall/gascity/internal/runtime/guard"
+	"github.com/gastownhall/gascity/internal/runtime/herdrmirror"
 	sessionhybrid "github.com/gastownhall/gascity/internal/runtime/hybrid"
+	sessionk8s "github.com/gastownhall/gascity/internal/runtime/k8s"
 	"github.com/gastownhall/gascity/internal/runtime/registry"
 	sessiontmux "github.com/gastownhall/gascity/internal/runtime/tmux"
 	"github.com/gastownhall/gascity/internal/session"
@@ -1393,13 +1395,22 @@ func openCityEventsProviderWithConfig(providerConfig func() config.EventsConfig,
 	return p, 0
 }
 
+// hybridMirrorActive reports whether a hybrid with these effective leg names
+// mirrors its remote sessions in herdr: only a herdr local leg can show them,
+// and only a k8s remote leg has the pods kubectl-herdr attaches to.
+func hybridMirrorActive(local, remote string) bool {
+	return local == "herdr" && remote == "k8s"
+}
+
 // newHybridProvider constructs a composite provider that routes sessions to
 // one of two legs based on session name. The legs are the runtimes named by
 // [session.hybrid] local and remote (default tmux and k8s), validated and
 // built through reg with the hybrid's own session config, city name and
 // city path. A session goes to the remote leg when its name contains the
 // GC_HYBRID_REMOTE_MATCH pattern, or [session] remote_match when that env
-// var is unset or empty; every other session goes to the local leg.
+// var is unset or empty; every other session goes to the local leg. With a
+// herdr local leg and a k8s remote leg, the remote leg is wrapped so each
+// remote session gets a herdr mirror tab (see [herdrmirror]).
 func newHybridProvider(reg *registry.Registry, sc config.SessionConfig, cityName, cityPath string) (runtime.Provider, error) {
 	if err := validateHybridLegs(reg, sc); err != nil {
 		return nil, fmt.Errorf("hybrid: %w", err)
@@ -1412,6 +1423,20 @@ func newHybridProvider(reg *registry.Registry, sc config.SessionConfig, cityName
 	remote, err := reg.New(remoteLeg.name, sc, cityName, cityPath)
 	if err != nil {
 		return nil, fmt.Errorf("hybrid: remote leg %q: %w", remoteLeg.name, err)
+	}
+	if hybridMirrorActive(localLeg.name, remoteLeg.name) {
+		ns, kctx := sessionk8s.TargetFromEnv()
+		m := herdrmirror.New(herdrmirror.Config{
+			HerdrSession: herdrSessionForCity(cityName),
+			Namespace:    ns,
+			KubeContext:  kctx,
+			Log:          os.Stderr,
+		})
+		if leg, err := herdrmirror.Wrap(remote, m); err != nil {
+			fmt.Fprintf(os.Stderr, "gc: hybrid: herdr mirror disabled for remote leg %q: %v\n", remoteLeg.name, err) //nolint:errcheck // best-effort diagnostic
+		} else {
+			remote = leg
+		}
 	}
 	pattern := sc.RemoteMatch
 	if v := os.Getenv("GC_HYBRID_REMOTE_MATCH"); v != "" {

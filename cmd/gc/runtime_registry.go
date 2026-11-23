@@ -96,11 +96,7 @@ func buildRuntimeRegistry() *registry.Registry {
 	// internal/runtime/herdr-provider-design.md. Agents run on the host, and
 	// runPreStart executes cfg.PreStart there before the agent is created.
 	must(r.Register("herdr", func(_ string, sc config.SessionConfig, cityName, cityPath string) (runtime.Provider, error) {
-		session := cityName
-		if session == "" {
-			session = "default"
-		}
-		return sessionherdr.New(session, providerStateDir("herdr", cityPath), cityPath, sc.SetupTimeoutDuration(), sc.SetupMaxTimeoutDuration()), nil
+		return sessionherdr.New(herdrSessionForCity(cityName), providerStateDir("herdr", cityPath), cityPath, sc.SetupTimeoutDuration(), sc.SetupMaxTimeoutDuration()), nil
 	}, hostFilesystemAndPreStart))
 	must(r.Register("hybrid", func(_ string, sc config.SessionConfig, cityName, cityPath string) (runtime.Provider, error) {
 		// The legs resolve against a fresh builtin registry, so only builtin
@@ -269,4 +265,13 @@ func acpProviderConfig(a config.ACPSessionConfig) sessionacp.Config {
 		StopGrace:         a.StopGraceDuration(),
 		CancelTimeout:     a.CancelTimeoutDuration(),
 	}
+}
+
+// herdrSessionForCity is the herdr session a city's herdr runtime uses: the
+// city's name, else "default". The hybrid's herdr mirror tabs go in it too.
+func herdrSessionForCity(cityName string) string {
+	if cityName == "" {
+		return "default"
+	}
+	return cityName
 }
