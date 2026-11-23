@@ -292,9 +292,9 @@ var storageVerbSessionInventory = func(cfg *config.City, cityPath string) ([]str
 }
 
 // cityRunsRemoteSessions reports whether the city's session runtime runs its
-// sessions on other hosts: k8s, hybrid (whose remote leg is k8s), ssh:, or an
-// exec: or pack runtime whose handshake does not declare itself local
-// (sessionRuntimeIsRemote).
+// sessions on other hosts: k8s, hybrid (whose remote leg, default k8s, can
+// run sessions on another host), ssh:, or an exec: or pack runtime whose
+// handshake does not declare itself local (sessionRuntimeIsRemote).
 //
 // The city's own [session] provider decides, not the operator's shell: a
 // GC_SESSION override in the shell running this command (a developer's

@@ -130,8 +130,12 @@ func v2SessionRuntimeRawName(cfg *config.City, lookupEnv func(string) (string, b
 // refused with the handshake's error or the capabilities it lacks as the
 // Fix. raw is the name untrimmed: the registry builds the provider from
 // it, so an exec runtime whose raw name differs (surrounding whitespace)
-// would run a script the probe never read, and is refused.
+// would run a script the probe never read, and is refused. "hybrid" is
+// always refused, judged by its legs (v2HybridRuntimeRefusal).
 func v2SessionRuntimeRefusal(cfg *config.City, cityPath string, reg *registry.Registry, raw, name string) (latchRefusal, bool) {
+	if name == "hybrid" {
+		return v2HybridRuntimeRefusal(cfg, cityPath, reg), true
+	}
 	if v2SessionRuntimesAdmitted[name] || !reg.Resolves(name) {
 		return latchRefusal{}, false
 	}
@@ -151,7 +155,7 @@ func v2SessionRuntimeRefusal(cfg *config.City, cityPath string, reg *registry.Re
 	}
 	feature, parityPR := "the "+name+" session runtime", ""
 	switch {
-	case name == "k8s" || name == "hybrid": // hybrid's remote leg is k8s
+	case name == "k8s":
 		parityPR = "PAR-K8S"
 	case name == "herdr":
 		parityPR = "PAR-HERDR"
@@ -165,4 +169,31 @@ func v2SessionRuntimeRefusal(cfg *config.City, cityPath string, reg *registry.Re
 		feature = "unsupported session runtime"
 	}
 	return latchRefusal{Feature: feature, Config: fmt.Sprintf("[session] provider = %q", name), ParityPR: parityPR}, true
+}
+
+// v2HybridRuntimeRefusal refuses the hybrid session runtime, which v2 does
+// not run. It reports the parity PR and fix of the first effective leg
+// ([session.hybrid] remote, then local) that v2 would itself refuse, so the
+// refusal names the work that unblocks the leg; a leg naming "hybrid" is
+// skipped (construction rejects it). When both legs are admitted, hybrid is
+// still refused, with no parity PR.
+func v2HybridRuntimeRefusal(cfg *config.City, cityPath string, reg *registry.Registry) latchRefusal {
+	const feature = "the hybrid session runtime"
+	cfgText := `[session] provider = "hybrid"`
+	remote, local := hybridLegs(cfg.Session)
+	for _, leg := range []hybridLeg{remote, local} {
+		name := strings.TrimSpace(leg.name)
+		if name == "hybrid" {
+			continue
+		}
+		legRefusal, refused := v2SessionRuntimeRefusal(cfg, cityPath, reg, leg.name, name)
+		if !refused {
+			continue
+		}
+		if leg.configured {
+			cfgText += fmt.Sprintf(" with [session.hybrid] %s = %q", leg.key, leg.name)
+		}
+		return latchRefusal{Feature: feature, Config: cfgText, ParityPR: legRefusal.ParityPR, Fix: legRefusal.Fix}
+	}
+	return latchRefusal{Feature: feature, Config: cfgText}
 }

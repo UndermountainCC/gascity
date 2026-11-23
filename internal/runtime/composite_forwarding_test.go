@@ -58,7 +58,7 @@ var unforwarded = map[string]map[string]struct{ Class, Reason, Bead string }{
 		"TurnRunningProvider":          {"deliberate", "as auto's", ""},
 		"V2ReadinessReporter":          {"deliberate", "as auto's", ""},
 		"FreshLivenessObserver":        {"deliberate", "hybrid's read is its leaves' cached one, so a hop through it proves absence only by its attested listing (cmd/gc/reconcile_effect_runtime.go unlistedElsewhere)", ""},
-		"TransportCapabilityProvider":  {"deliberate", "production's hybrid is tmux over k8s (cmd/gc/providers.go newHybridProvider), and neither has it", ""},
+		"TransportCapabilityProvider":  {"deliberate", "hybrid's default tmux and k8s legs and a herdr leg ([session.hybrid], cmd/gc/providers.go newHybridProvider) lack it; an acp leg's is not forwarded", ""},
 		"TmuxSubtreeFence":             {"deliberate", "hybrid scans its local leaf alone, whose own scan applies the leaf's fence", ""},
 	},
 }

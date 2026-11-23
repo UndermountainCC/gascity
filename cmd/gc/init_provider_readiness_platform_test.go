@@ -31,6 +31,24 @@ func writeSessionProviderCity(t *testing.T, provider string) string {
 	return dir
 }
 
+// writeHybridLegsCity writes a hybrid city.toml whose [session.hybrid] table
+// names the given legs; an empty leg is left unset.
+func writeHybridLegsCity(t *testing.T, local, remote string) string {
+	t.Helper()
+	dir := t.TempDir()
+	body := "[workspace]\nname = \"scratch\"\n\n[beads]\nprovider = \"file\"\n\n[session]\nprovider = \"hybrid\"\n\n[session.hybrid]\n"
+	if local != "" {
+		body += "local = \"" + local + "\"\n"
+	}
+	if remote != "" {
+		body += "remote = \"" + remote + "\"\n"
+	}
+	if err := os.WriteFile(filepath.Join(dir, "city.toml"), []byte(body), 0o644); err != nil {
+		t.Fatalf("writing city.toml: %v", err)
+	}
+	return dir
+}
+
 // stubMissingTools makes every name in missing look absent and every other
 // name look present, so a test asserts about requirements rather than about
 // whatever happens to be installed on the host.
@@ -136,6 +154,54 @@ func TestCheckHardDependenciesRequiresHerdrWhenHerdrIsSelected(t *testing.T) {
 	other := checkHardDependencies(writeSessionProviderCity(t, "subprocess"))
 	if containsDep(other, "herdr") {
 		t.Fatalf("a subprocess city reported %v, want no herdr requirement", missingDepNames(other))
+	}
+
+	// A hybrid city whose local leg is herdr runs its local sessions on
+	// herdr, so it needs herdr installed and does not need tmux.
+	hybridHerdr := writeHybridLegsCity(t, "herdr", "")
+	if got := checkHardDependencies(hybridHerdr); !containsDep(got, "herdr") {
+		t.Fatalf("a hybrid city with a herdr local leg and no herdr reported %v, want herdr missing", missingDepNames(got))
+	}
+	stubMissingTools(t, "tmux")
+	if got := checkHardDependencies(hybridHerdr); containsDep(got, "tmux") {
+		t.Fatalf("a hybrid city with a herdr local leg reported %v, want no tmux requirement", missingDepNames(got))
+	}
+}
+
+// TestSelectionResolvesToTmuxFollowsHybridLegs pins that a hybrid selection
+// needs tmux only when one of its effective legs runs on tmux: a leg named
+// "tmux", or a leg the builtin registry does not resolve (construction
+// rejects it, so readiness over-requires rather than under-requires).
+func TestSelectionResolvesToTmuxFollowsHybridLegs(t *testing.T) {
+	cases := []struct {
+		name          string
+		local, remote string
+		want          bool
+	}{
+		{name: "default legs", want: true},
+		{name: "herdr local, k8s remote", local: "herdr", remote: "k8s", want: false},
+		{name: "herdr local, defaulted remote", local: "herdr", want: false},
+		{name: "tmux local, herdr remote", local: "tmux", remote: "herdr", want: true},
+		{name: "unresolved local", local: "hrdr", remote: "k8s", want: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := &config.City{Session: config.SessionConfig{
+				Provider: "hybrid",
+				Hybrid:   config.HybridSessionConfig{Local: tc.local, Remote: tc.remote},
+			}}
+			// Direct callers that pass only the selection name.
+			if got := selectionResolvesToTmux(map[string]bool{"hybrid": true}, cfg); got != tc.want {
+				t.Errorf("selectionResolvesToTmux({hybrid}) = %v, want %v", got, tc.want)
+			}
+			// The readiness path, whose name set also carries the legs.
+			if got := selectionResolvesToTmux(sessionRuntimeNamesFromConfig(cfg, true), cfg); got != tc.want {
+				t.Errorf("selectionResolvesToTmux(sessionRuntimeNamesFromConfig) = %v, want %v", got, tc.want)
+			}
+		})
+	}
+	if !selectionResolvesToTmux(map[string]bool{"hybrid": true}, nil) {
+		t.Errorf("selectionResolvesToTmux({hybrid}, nil) = false, want true (default local leg is tmux)")
 	}
 }
 

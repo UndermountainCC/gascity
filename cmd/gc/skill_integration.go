@@ -99,7 +99,8 @@ func canStage1Materialize(rt materializationRuntime, agent *config.Agent) bool {
 // registration today, tmux (the default), herdr and an exec runtime whose
 // handshake declares fs.host with locality=local qualify; subprocess reads
 // the host filesystem but does not execute PreStart; hybrid does not
-// qualify because a configured RemoteMatch routes some sessions to k8s.
+// qualify because a configured RemoteMatch routes some sessions to its
+// remote leg.
 //
 // Agent.Session == "acp" overrides the city-level runtime per agent: even in
 // a tmux city, an ACP agent is ineligible because the session runs

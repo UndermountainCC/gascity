@@ -119,8 +119,11 @@ func promptDeliverySupportFor(runtimeName string, packRuntimes map[string]config
 	// k8s places arg/flag prompts on the agent argv (k8s/pod.go agentCommandB64) and falls back to cfg.Nudge post-start for none mode and oversized prompts.
 	case "k8s":
 		return promptDeliverySupportNudgeFallback
-	// hybrid routes per session name to tmux or k8s and delegates Nudge to
-	// whichever it routed to (hybrid/hybrid.go:97); both legs are nudge-capable.
+	// hybrid routes per session name to its configured local or remote leg
+	// ([session.hybrid], default tmux and k8s) and delegates Nudge to that leg
+	// (hybrid/hybrid.go). The default legs and a herdr leg are nudge-capable.
+	// Classification is by name, so a leg without a nudge path is not seen
+	// here; leg-aware delivery is a follow-up.
 	case "hybrid":
 		return promptDeliverySupportNudgeFallback
 	case "t3bridge":
