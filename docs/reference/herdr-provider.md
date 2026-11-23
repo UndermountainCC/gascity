@@ -155,11 +155,124 @@ never falls back to tmux.
 With a herdr local leg, `gc init` checks that herdr is installed and asks for
 tmux only if the other leg needs it. A change to `[session.hybrid]` takes
 effect after the city restarts. The `hybrid` provider stays
-unavailable under the v2 session reconciler whichever legs it runs. Showing
-remote sessions inside herdr is not covered here.
+unavailable under the v2 session reconciler whichever legs it runs. With a
+k8s remote leg, herdr can also show the remote sessions: see
+[Remote sessions in herdr](#remote-sessions-in-herdr-mirror-tabs).
 
 The generated reference lists both keys under
 [`HybridSessionConfig`](/reference/config#hybridsessionconfig).
+
+## Remote sessions in herdr (mirror tabs)
+
+A hybrid city with a herdr local leg shows its local agents in herdr, but the
+sessions it sends to k8s pods run out of sight. A **mirror tab** brings each
+one back: a herdr tab attached to the pod's terminal, showing the agent as
+working, idle, or blocked like any local tab.
+
+### Turning it on
+
+Mirror tabs need three things, and no config key:
+
+- `[session] provider = "hybrid"` with `[session.hybrid] local = "herdr"` and
+  the remote leg `k8s` (the default).
+- `kubectl-herdr` installed on the `PATH` of the `gc` process that runs the city. Without it every remote session
+  still starts, and each start logs one line:
+
+  ```text
+  gc: hybrid: kubectl-herdr not found on PATH; skipping herdr mirror tab for session "rig--pod-worker"
+  ```
+
+- An agent image that records the agent's state (see
+  [Agent state in the pod](#agent-state-in-the-pod)). Without it the tab still
+  mirrors the terminal but reports no agent state.
+
+Any other leg combination runs exactly as before: nothing is looked up or
+logged.
+
+### What gc does
+
+| When | gc |
+| --- | --- |
+| A remote session starts | In the background, finds or creates the workspace `k8s:<namespace>` in the city's herdr session and runs one `kubectl-herdr attach` for the session's pod, unless that workspace already has a tab labeled with the session name. |
+| A remote session stops | Closes every tab labeled with the session name in that workspace. A stop that fails while the pod may still be running keeps the tab. |
+
+The herdr session is the one the herdr leg uses: the city name, else
+`default`. The namespace and kube context are the k8s leg's own
+(`GC_K8S_NAMESPACE`, default `gc`, and `GC_K8S_CONTEXT`). The attach targets
+the same pod and tmux session the k8s leg created:
+
+```bash
+# -l: the k8s leg's session label; -c/--tmux-session: the agent container's
+# tmux session; --workspace: the k8s:<namespace> workspace's id;
+# --label: the tab label, which is the gc session name.
+kubectl-herdr attach -n gc rig--pod-worker \
+  -l gc-session=rig--pod-worker \
+  -c agent --tmux-session main \
+  --herdr-session city --workspace w2 \
+  --label rig--pod-worker \
+  --focus=false --output json
+```
+
+The attach runs off the session's start path under a 45-second budget, and
+the close under a 10-second budget. A mirror failure is one log line starting
+`gc: hybrid: herdr mirror tab for session "<name>":` and never fails the
+session's start or stop.
+
+### Agent state in the pod
+
+kubectl-herdr's supervisor reads the agent's state from a file in the agent
+container:
+
+| Contract | Value |
+| --- | --- |
+| Path | `$KUBECTL_HERDR_STATE_FILE`, else `/tmp/kubectl-herdr/state` |
+| Content | one line, `<state> <unix-seconds>`, e.g. `working 1795000000` |
+| States | `idle`, `working`, `blocked` |
+| Write | atomic: a temp file in the same directory, then a rename |
+
+The reference agent image (`contrib/k8s/Dockerfile.agent`) installs a writer
+and the Claude Code hooks that call it, as managed settings that apply to every
+agent user and run alongside gc's own hooks:
+
+| Claude Code hook event | State |
+| --- | --- |
+| `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `PostToolUseFailure` | `working` |
+| `Notification` (matcher `permission_prompt`) | `blocked` |
+| `Stop`, `StopFailure`, `SessionStart` (matcher `startup\|resume\|clear`) | `idle` |
+
+A custom image adds the same two files:
+
+```dockerfile
+USER root
+COPY contrib/k8s/kubectl-herdr-state.sh /usr/local/bin/kubectl-herdr-state.sh
+COPY contrib/k8s/claude-managed-settings.json /etc/claude-code/managed-settings.json
+```
+
+An image that already ships `/etc/claude-code/managed-settings.json` replaces
+the reference file, so merge its `hooks` block into yours. An agent other than
+Claude Code records its state by running the writer itself:
+
+```bash
+sh /usr/local/bin/kubectl-herdr-state.sh working
+```
+
+The writer always exits 0 and prints nothing on stdout, so a failed write never
+breaks the agent's turn.
+
+### Known limits
+
+- A session already running when the city starts gets no mirror tab until it
+  restarts, and a relaunch does not reopen a tab you closed.
+- After the city restarts, stopping a session closes its whole tab, including
+  any panes you split into it.
+- The pod selector `gc-session=<session>` is not scoped to a city. Two cities
+  sharing a namespace with a session of the same name match two pods, and the
+  supervisor waits instead of attaching.
+- Two cities with the same herdr session (both unnamed, so both `default`) and
+  the same namespace share one mirror workspace, and same-named sessions
+  collide on a tab label.
+- The mirror shows one agent per container, as kubectl-herdr's default agent
+  kind (`claude`); there is no per-agent override.
 
 ## Piloting safely
 
