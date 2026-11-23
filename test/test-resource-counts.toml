@@ -2711,6 +2711,11 @@ resource = "fixed_sleep"
 calls = 1
 
 [[count]]
+path = "internal/runtime/k8s/state_writer_script_test.go"
+resource = "subprocess"
+calls = 1
+
+[[count]]
 path = "internal/runtime/privatedir_windows_test.go"
 resource = "subprocess"
 calls = 1
