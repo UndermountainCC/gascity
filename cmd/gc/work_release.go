@@ -613,3 +613,35 @@ func (a *strandedClaimAlerts) seat(sessions beads.Store, id string) strandedSeat
 	a.mu.Unlock()
 	return got
 }
+
+// clearStoppedSeatIdentity clears the gc.session_id and gc.session_name a
+// claim the execution-stalled stop gave back still carries for the stopped
+// seat, so the open claim no longer names a session that will not run it.
+// It re-reads the claim live and clears only the keys that still name row: a
+// claim another seat took since the release keeps that seat's stamps (the
+// next claim stamps its own, compare-and-skip, so a clear that races one is
+// re-stamped). Best effort. It lives with the release writes, which effects
+// reach only through this layer.
+func clearStoppedSeatIdentity(hit seatWorkHit, row sessionpkg.Info, stderr io.Writer) {
+	live, err := liveBeadRead(hit.store, hit.bead.ID)
+	if err != nil {
+		fmt.Fprintf(stderr, "execution-stalled stop: re-reading released claim %s: %v\n", hit.bead.ID, err) //nolint:errcheck // best-effort
+		return
+	}
+	if live.Status != "open" || strings.TrimSpace(live.Assignee) != "" {
+		return
+	}
+	cleared := map[string]string{}
+	if id := strings.TrimSpace(live.Metadata[beadmeta.SessionIDMetadataKey]); id != "" && id == strings.TrimSpace(row.ID) {
+		cleared[beadmeta.SessionIDMetadataKey] = ""
+	}
+	if name := strings.TrimSpace(live.Metadata[beadmeta.SessionNameMetadataKey]); name != "" && name == strings.TrimSpace(row.SessionName) {
+		cleared[beadmeta.SessionNameMetadataKey] = ""
+	}
+	if len(cleared) == 0 {
+		return
+	}
+	if err := hit.store.SetMetadataBatch(live.ID, cleared); err != nil {
+		fmt.Fprintf(stderr, "execution-stalled stop: clearing %s's session identity on released claim %s: %v\n", row.ID, live.ID, err) //nolint:errcheck // best-effort
+	}
+}

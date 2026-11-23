@@ -33,6 +33,9 @@ var interruptedCloseGates = map[string]closeGate{
 	"stale-session":           closeReleasing,
 	"dead-runtime":            closeReleasing,
 	strandedRepairCloseReason: closeReleasing,
+	// The undesired pool row's close of a seat an execution-stalled drain
+	// stopped (closesAsExecutionStalled).
+	executionStalledDrainReason: closeFreeSlot,
 }
 
 // interruptedClosePassthroughCodes are the pool-freeable sleep reasons the
