@@ -4769,6 +4769,209 @@ func TestBuildDesiredStateFairShareIgnoresInFlightPoolCreates(t *testing.T) {
 	}
 }
 
+// runPoolCreateBudgetTick realizes states as one desired-state build of the
+// city at cityPath would: a fresh create budget, the fair share configured
+// once, then each pool in order. Each tick gets a fresh store, so creates
+// never become reusable sessions (short-lived workflow sessions finish
+// between ticks) and every tick sees the same demand. It returns the fresh
+// creates per template.
+func runPoolCreateBudgetTick(t *testing.T, cityPath string, cfg *config.City, states []PoolDesiredState) map[string]int {
+	t.Helper()
+	var stderr bytes.Buffer
+	bp := newAgentBuildParams("test-city", cityPath, cfg, runtime.NewFake(), time.Now().UTC(), beads.NewMemStore(), &stderr)
+	bp.sessionBeads = &sessionBeadSnapshot{}
+	bp.configurePoolSessionCreateFairShare(states)
+	desired := map[string]TemplateParams{}
+	for _, state := range states {
+		cfgAgent := findAgentByTemplate(cfg, state.Template)
+		if cfgAgent == nil {
+			t.Fatalf("no agent for template %q", state.Template)
+		}
+		realizePoolDesiredSessions(bp, cfgAgent, state, desired, &stderr)
+	}
+	counts := map[string]int{}
+	for _, tp := range desired {
+		counts[tp.TemplateName]++
+	}
+	return counts
+}
+
+// A pool whose only request is a wake-known-identity request (wake_mode =
+// "fresh" with work still stamped for its asleep or closed session) plans a
+// fresh create, so it must take part in the fair share. Before, only "new"
+// requests counted: such a pool never held a reserved token, depended on a
+// spare that saturating demand never leaves, and was refused every tick.
+func TestPoolCreateBudgetServesWakeKnownIdentityPoolUnderSaturation(t *testing.T) {
+	maxWakes := 2
+	pool := func(name string) config.Agent {
+		return config.Agent{Name: name, StartCommand: "true", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(5)}
+	}
+	sre := pool("sre")
+	sre.MaxActiveSessions = intPtr(1)
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Daemon:    config.DaemonConfig{MaxWakesPerTick: &maxWakes},
+		Agents:    []config.Agent{pool("alpha"), pool("bravo"), sre},
+	}
+	newRequests := func(template string, n int) []SessionRequest {
+		out := make([]SessionRequest, n)
+		for i := range out {
+			out[i] = SessionRequest{Template: template, Tier: "new"}
+		}
+		return out
+	}
+	states := []PoolDesiredState{
+		{Template: "alpha", Requests: newRequests("alpha", 3)},
+		{Template: "bravo", Requests: newRequests("bravo", 3)},
+		{Template: "sre", Requests: []SessionRequest{{Template: "sre", Tier: "wake-known-identity"}}},
+	}
+	cityPath := t.TempDir()
+
+	served := false
+	for tick := 1; tick <= 3; tick++ {
+		counts := runPoolCreateBudgetTick(t, cityPath, cfg, states)
+		total := 0
+		for _, n := range counts {
+			total += n
+		}
+		if total > maxWakes {
+			t.Fatalf("tick %d: %d fresh creates, want at most max_wakes_per_tick=%d; counts=%v", tick, total, maxWakes, counts)
+		}
+		if counts["sre"] > 0 {
+			served = true
+			break
+		}
+	}
+	if !served {
+		t.Fatal("sre (wake-known-identity request) got no fresh create in 3 ticks while alpha and bravo saturated the create budget")
+	}
+}
+
+// A pool that gets a fresh create in a build is not deferred, even when the
+// budget refused its other requests in that build; otherwise a pool served
+// every tick would tie with a starved one for the priority token.
+func TestPoolCreateDeferralEndsWhenPartlyServed(t *testing.T) {
+	maxWakes := 1
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Daemon:    config.DaemonConfig{MaxWakesPerTick: &maxWakes},
+		Agents: []config.Agent{{
+			Name: "alpha", StartCommand: "true", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(5),
+		}},
+	}
+	states := []PoolDesiredState{{Template: "alpha", Requests: []SessionRequest{
+		{Template: "alpha", Tier: "new"}, {Template: "alpha", Tier: "new"}, {Template: "alpha", Tier: "new"},
+	}}}
+	cityPath := t.TempDir()
+
+	for tick := 1; tick <= 2; tick++ {
+		if got := runPoolCreateBudgetTick(t, cityPath, cfg, states)["alpha"]; got != 1 {
+			t.Fatalf("tick %d: alpha fresh creates = %d, want 1 (limit 1, three requests)", tick, got)
+		}
+		if got := poolSessionCreateDeferrals.deferred(cityPath, "alpha"); got != 0 {
+			t.Fatalf("tick %d: alpha deferral after a build that planned it a create = %d, want 0", tick, got)
+		}
+	}
+}
+
+// The fair-share seed advances on every desired-state build, including
+// builds that realize nothing, so the build that does realize can land on the
+// same rotation start tick after tick. A template the budget refused must move
+// ahead on the next build instead of waiting on the rotation.
+func TestPoolCreateBudgetDeferredPoolGoesFirstNextTick(t *testing.T) {
+	maxWakes := 1
+	pool := func(name string) config.Agent {
+		return config.Agent{Name: name, StartCommand: "true", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(5)}
+	}
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Daemon:    config.DaemonConfig{MaxWakesPerTick: &maxWakes},
+		Agents:    []config.Agent{pool("alpha"), pool("zulu")},
+	}
+	states := []PoolDesiredState{
+		{Template: "alpha", Requests: []SessionRequest{{Template: "alpha", Tier: "new"}}},
+		{Template: "zulu", Requests: []SessionRequest{{Template: "zulu", Tier: "new"}}},
+	}
+	cityPath := t.TempDir()
+
+	previous := ""
+	for tick := 1; tick <= 4; tick++ {
+		counts := runPoolCreateBudgetTick(t, cityPath, cfg, states)
+		// A second build each tick (the controller's control-dispatcher
+		// build, say) advances the seed again: with two contending
+		// templates the rotation start never moves.
+		poolSessionCreateFairShareCounter.Add(1)
+		if total := counts["alpha"] + counts["zulu"]; total != 1 {
+			t.Fatalf("tick %d: %d fresh creates, want exactly max_wakes_per_tick=1; counts=%v", tick, total, counts)
+		}
+		winner := "alpha"
+		if counts["zulu"] == 1 {
+			winner = "zulu"
+		}
+		if winner == previous {
+			t.Fatalf("tick %d: %s won again while the other pool, refused last tick, waited", tick, winner)
+		}
+		previous = winner
+	}
+}
+
+func TestPoolCreateDeferralsCountConsecutiveRefusedBuilds(t *testing.T) {
+	d := newPoolCreateDeferrals()
+	d.settle("city-a", "sre", true)
+	d.settle("city-a", "sre", true)
+	if got := d.deferred("city-a", "sre"); got != 2 {
+		t.Fatalf("after two refused builds: deferred = %d, want 2", got)
+	}
+	if got := d.deferred("city-b", "sre"); got != 0 {
+		t.Fatalf("other city: deferred = %d, want 0", got)
+	}
+	d.settle("city-a", "sre", false)
+	if got := d.deferred("city-a", "sre"); got != 0 {
+		t.Fatalf("after a build without refusal: deferred = %d, want 0", got)
+	}
+}
+
+// A deferral streak ends on any build that realizes the pool without a budget
+// refusal, not only on a claim: a deferred pool whose request is then served
+// by reuse or stopped at a gate must not keep a priority token it never spends.
+func TestPoolCreateDeferralEndsWhenPoolIsRealizedWithoutRefusal(t *testing.T) {
+	maxWakes := 1
+	pool := func(name string) config.Agent {
+		return config.Agent{Name: name, StartCommand: "true", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(5)}
+	}
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Daemon:    config.DaemonConfig{MaxWakesPerTick: &maxWakes},
+		Agents:    []config.Agent{pool("alpha"), pool("sre")},
+	}
+	cityPath := t.TempDir()
+	poolSessionCreateDeferrals.settle(cityPath, "sre", true)
+	if got := poolSessionCreateDeferrals.deferred(cityPath, "sre"); got != 1 {
+		t.Fatalf("seeded deferral = %d, want 1", got)
+	}
+
+	var stderr bytes.Buffer
+	bp := newAgentBuildParams("test-city", cityPath, cfg, runtime.NewFake(), time.Now().UTC(), beads.NewMemStore(), &stderr)
+	bp.sessionBeads = &sessionBeadSnapshot{}
+	bp.poolScaleCheckPartialTemplates = map[string]bool{"sre": true}
+	states := []PoolDesiredState{
+		{Template: "sre", Requests: []SessionRequest{{Template: "sre", Tier: "new"}}},
+		{Template: "alpha", Requests: []SessionRequest{{Template: "alpha", Tier: "new"}}},
+	}
+	bp.configurePoolSessionCreateFairShare(states)
+	desired := map[string]TemplateParams{}
+	for _, state := range states {
+		realizePoolDesiredSessions(bp, findAgentByTemplate(cfg, state.Template), state, desired, &stderr)
+	}
+
+	if !strings.Contains(stderr.String(), "partial demand read") {
+		t.Fatalf("stderr = %q, want sre stopped at the partial-demand gate", stderr.String())
+	}
+	if got := poolSessionCreateDeferrals.deferred(cityPath, "sre"); got != 0 {
+		t.Fatalf("sre deferral after a gated build = %d, want 0: the streak ended without a budget refusal", got)
+	}
+}
+
 func TestBuildDesiredStateDependencyFloorExemptFromFreshCreateBudget(t *testing.T) {
 	maxWakes := 1
 	store := beads.NewMemStore()

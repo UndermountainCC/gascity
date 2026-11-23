@@ -1,7 +1,10 @@
 // Package poolplan contains pure planning policy for agent pools.
 package poolplan
 
-import "sync"
+import (
+	"sort"
+	"sync"
+)
 
 // Demand describes one pool template's fresh-session demand. Each template
 // must appear at most once, and slice order defines seed-rotation order.
@@ -12,6 +15,12 @@ type Demand struct {
 	// floor. It reserves at most one floor token; remaining demand participates
 	// in the general round-robin rather than the elastic reserve.
 	HasFloor bool
+	// Deferred counts the consecutive planning cycles in which the budget
+	// refused this template a fresh create. A deferred template gets one
+	// token before floor, elastic and round-robin shares, most-deferred
+	// first, so a pool that keeps losing the rotation still starts a session
+	// within a bounded number of cycles. Zero leaves the shares unchanged.
+	Deferred int
 }
 
 // CreateBudget coordinates a shared limit across concurrent pool creates.
@@ -33,9 +42,10 @@ func NewCreateBudget(limit int) *CreateBudget {
 }
 
 // ConfigureFairShare reserves the remaining tokens across unique, ordered pool
-// templates. Seed rotation prevents stable input order from starving the same
-// template on every planning cycle. ConfigureFairShare must run before claims;
-// reconfiguration distributes only the capacity that remains.
+// templates. Deferred templates are served first; seed rotation then keeps
+// stable input order from favoring the same template on every planning cycle.
+// ConfigureFairShare must run before claims; reconfiguration distributes only
+// the capacity that remains.
 func (b *CreateBudget) ConfigureFairShare(demands []Demand, seed uint64) {
 	if b == nil {
 		return
@@ -103,6 +113,28 @@ func fairShares(demands []Demand, limit int, seed uint64) (map[string]int, int) 
 	remaining := limit
 	start := int(seed % uint64(len(active)))
 
+	// Give one token to each deferred template, most-deferred first and
+	// seed-rotated among equals, before any other share. A token given here
+	// counts as a floor template's floor token.
+	floorUsed := 0
+	deferred := make([]Demand, 0, len(active))
+	for offset := 0; offset < len(active); offset++ {
+		if demand := active[(start+offset)%len(active)]; demand.Deferred > 0 {
+			deferred = append(deferred, demand)
+		}
+	}
+	sort.SliceStable(deferred, func(i, j int) bool { return deferred[i].Deferred > deferred[j].Deferred })
+	for _, demand := range deferred {
+		if remaining <= 0 {
+			break
+		}
+		shares[demand.Template]++
+		remaining--
+		if demand.HasFloor {
+			floorUsed++
+		}
+	}
+
 	// Reserve one quarter of the limit for non-floor demand. Floor-bearing
 	// templates retain priority while large floor sets cannot starve elastic
 	// pools. Limits below four preserve strict floor-first behavior.
@@ -119,13 +151,12 @@ func fairShares(demands []Demand, limit int, seed uint64) (map[string]int, int) 
 
 	// Reserve one token per floor-bearing template in seed-rotated order.
 	floorBudget := limit - elasticReserve
-	floorUsed := 0
 	for offset := 0; offset < len(active); offset++ {
-		if floorUsed >= floorBudget {
+		if floorUsed >= floorBudget || remaining <= 0 {
 			break
 		}
 		demand := active[(start+offset)%len(active)]
-		if demand.HasFloor {
+		if demand.HasFloor && shares[demand.Template] == 0 {
 			shares[demand.Template]++
 			remaining--
 			floorUsed++
