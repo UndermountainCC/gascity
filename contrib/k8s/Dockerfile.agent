@@ -98,6 +98,14 @@ COPY contrib/beads-scripts/gc-beads-br /usr/local/bin/gc-beads-br
 # gc-mail-mcp-agent-mail script for the exec:mail protocol.
 COPY contrib/mail-scripts/gc-mail-mcp-agent-mail /usr/local/bin/gc-mail-mcp-agent-mail
 
+# herdr mirror tabs: Claude Code hooks write the agent's state where the
+# kubectl-herdr supervisor reads it. Managed settings sit outside $HOME, so
+# they apply to every agent user and survive the credentials copy, and their
+# hooks run alongside gc's own --settings hooks. See
+# docs/reference/herdr-provider.md.
+COPY contrib/k8s/kubectl-herdr-state.sh /usr/local/bin/kubectl-herdr-state.sh
+COPY contrib/k8s/claude-managed-settings.json /etc/claude-code/managed-settings.json
+
 # Claude credentials are injected at runtime via K8s Secret volume mount,
 # not baked into the image. See contrib/k8s/README-credentials.md.
 # The CLAUDE_CONFIG_DIR env var (set by gc-session-k8s) points to the mount.

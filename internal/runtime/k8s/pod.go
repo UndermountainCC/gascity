@@ -436,7 +436,7 @@ func buildPod(name string, cfg runtime.Config, p *Provider) (*corev1.Pod, error)
 			ServiceAccountName: p.serviceAccount,
 			RestartPolicy:      corev1.RestartPolicyNever,
 			Containers: []corev1.Container{{
-				Name:            "agent",
+				Name:            AgentContainer,
 				Image:           p.image,
 				ImagePullPolicy: corev1.PullAlways,
 				// Not podWorkDir: the runtime resolves this before the entrypoint

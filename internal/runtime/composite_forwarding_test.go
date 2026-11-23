@@ -6,6 +6,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/runtime/auto"
+	"github.com/gastownhall/gascity/internal/runtime/herdrmirror"
 	"github.com/gastownhall/gascity/internal/runtime/hybrid"
 )
 
@@ -97,6 +98,41 @@ func TestCompositesForwardEveryLeafCapability(t *testing.T) {
 		for iface := range unforwarded[name] {
 			if !slices.Contains(leaves, iface) {
 				t.Errorf("%s's entry %s: no leaf implements it", name, iface)
+			}
+		}
+	}
+}
+
+// Kills a herdr mirror leg that hides or invents a capability of the k8s leaf
+// it wraps: the wrapped production leaf implements exactly the optional
+// interfaces the bare one does, so routing, sleep, relaunch and listing read
+// the same capabilities through it.
+func TestHerdrMirrorLegForwardsExactlyTheK8sLeafCapabilities(t *testing.T) {
+	kube := productionBackends(t)[runtime.ProfileK8s]
+	leg, err := herdrmirror.Wrap(kube, herdrmirror.New(herdrmirror.Config{HerdrSession: "city", Namespace: "gc"}))
+	if err != nil {
+		t.Fatalf("Wrap(production k8s leaf): %v", err)
+	}
+	if got, want := implemented(leg), implemented(kube); !slices.Equal(got, want) {
+		t.Fatalf("mirror leg implements %q, want the k8s leaf's %q", got, want)
+	}
+}
+
+// Kills a hybrid over a herdr local leg and a mirrored k8s remote leg that
+// drops a capability either leg has: it forwards everything its legs
+// implement, but for hybrid's reviewed unforwarded entries.
+func TestHybridOverHerdrAndAMirroredK8sLegForwardsTheLegCapabilities(t *testing.T) {
+	backends := productionBackends(t)
+	local := backends[runtime.ProfileHerdr]
+	remote, err := herdrmirror.Wrap(backends[runtime.ProfileK8s], herdrmirror.New(herdrmirror.Config{HerdrSession: "city", Namespace: "gc"}))
+	if err != nil {
+		t.Fatalf("Wrap(production k8s leaf): %v", err)
+	}
+	has := implemented(hybrid.New(local, remote, func(string) bool { return false }))
+	for _, leg := range []runtime.Provider{local, remote} {
+		for _, iface := range implemented(leg) {
+			if _, listed := unforwarded["hybrid"][iface]; !listed && !slices.Contains(has, iface) {
+				t.Errorf("hybrid(herdr, mirrored k8s) does not implement %s, which a leg does", iface)
 			}
 		}
 	}

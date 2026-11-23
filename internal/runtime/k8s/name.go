@@ -16,6 +16,15 @@ import (
 // tmuxSession is the tmux session name inside each pod (one session per pod).
 const tmuxSession = "main"
 
+// PodTmuxSession is the tmux session the agent runs in inside each session
+// pod. Tools that attach to a running session (for example a terminal mirror)
+// target this session and never create one.
+const PodTmuxSession = tmuxSession
+
+// AgentContainer is the name of the container in each session pod that runs
+// the agent and its tmux session.
+const AgentContainer = "agent"
+
 // startupGracePeriod is the maximum time allowed for a pod to complete
 // workspace initialization and start its tmux session. Running pods younger
 // than this with dead tmux are treated as still initializing, not stale.

@@ -1,0 +1,28 @@
+{
+  "hooks": {
+    "UserPromptSubmit": [
+      { "hooks": [{ "type": "command", "command": "sh /usr/local/bin/kubectl-herdr-state.sh working" }] }
+    ],
+    "PreToolUse": [
+      { "hooks": [{ "type": "command", "command": "sh /usr/local/bin/kubectl-herdr-state.sh working" }] }
+    ],
+    "PostToolUse": [
+      { "hooks": [{ "type": "command", "command": "sh /usr/local/bin/kubectl-herdr-state.sh working" }] }
+    ],
+    "PostToolUseFailure": [
+      { "hooks": [{ "type": "command", "command": "sh /usr/local/bin/kubectl-herdr-state.sh working" }] }
+    ],
+    "Notification": [
+      { "matcher": "permission_prompt", "hooks": [{ "type": "command", "command": "sh /usr/local/bin/kubectl-herdr-state.sh blocked" }] }
+    ],
+    "Stop": [
+      { "hooks": [{ "type": "command", "command": "sh /usr/local/bin/kubectl-herdr-state.sh idle" }] }
+    ],
+    "StopFailure": [
+      { "hooks": [{ "type": "command", "command": "sh /usr/local/bin/kubectl-herdr-state.sh idle" }] }
+    ],
+    "SessionStart": [
+      { "matcher": "startup|resume|clear", "hooks": [{ "type": "command", "command": "sh /usr/local/bin/kubectl-herdr-state.sh idle" }] }
+    ]
+  }
+}

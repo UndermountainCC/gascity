@@ -45,6 +45,8 @@ go_test(
         "seams_test.go",
         "session_script_test.go",
         "staging_test.go",
+        "state_writer_script_test.go",
+        "target_test.go",
         "testenv_helpers_test.go",
         "testenv_import_test.go",
     ],

@@ -187,6 +187,7 @@ go_test(
         "//internal/runtime/auto",
         "//internal/runtime/exec",
         "//internal/runtime/herdr",
+        "//internal/runtime/herdrmirror",
         "//internal/runtime/hybrid",
         "//internal/runtime/k8s",
         "//internal/runtime/runtimetest",
