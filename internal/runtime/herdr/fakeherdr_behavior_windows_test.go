@@ -214,6 +214,9 @@ func (s fakeHerdrSpec) worktree(argv []string, stdout, stderr io.Writer) int {
 		if has("open_error") {
 			return fail(read("open_error"), 1)
 		}
+		if ws := positional(argv, 3); has("open_error_" + ws) {
+			return fail(read("open_error_"+ws), 1)
+		}
 		if has("open_ws") {
 			out(`{"result":{"type":"worktree_opened","already_open":true,"workspace":{"workspace_id":"w2"},"tab":{"tab_id":"w2:t-active"},"root_pane":{"pane_id":"w2:p-active"}}}`)
 		} else {
@@ -221,13 +224,19 @@ func (s fakeHerdrSpec) worktree(argv []string, stdout, stderr io.Writer) int {
 			out(`{"result":{"type":"worktree_opened","already_open":false,"workspace":{"workspace_id":"w2"},"tab":{"tab_id":"w2:t1"},"root_pane":{"pane_id":"w2:p1"}}}`)
 		}
 	case "workspace list":
-		if has("rig_ws") {
+		if has("workspaces.json") {
+			out(read("workspaces.json"))
+		} else if has("rig_ws") {
 			out(`{"result":{"workspaces":[{"workspace_id":"w1","label":"` + read("rig_ws") + `"}]}}`)
 		} else {
 			out(`{"result":{"workspaces":[]}}`)
 		}
 	case "workspace create":
-		out(`{"result":{"workspace":{"workspace_id":"w1"},"tab":{"tab_id":"w1:t1"},"root_pane":{"pane_id":"w1:p1"}}}`)
+		ws := "w1"
+		if has("create_ws") {
+			ws = read("create_ws")
+		}
+		out(`{"result":{"workspace":{"workspace_id":"` + ws + `"},"tab":{"tab_id":"` + ws + `:t1"},"root_pane":{"pane_id":"` + ws + `:p1"}}}`)
 	case "tab list":
 		ws := positional(argv, 3)
 		switch {
