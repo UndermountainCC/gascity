@@ -974,6 +974,11 @@ resource = "environment"
 calls = 3
 
 [[count]]
+path = "cmd/gc/hybrid_legs_test.go"
+resource = "environment"
+calls = 1
+
+[[count]]
 path = "cmd/gc/infra_class_purge_batched_bd_integration_test.go"
 resource = "fixed_sleep"
 calls = 1
