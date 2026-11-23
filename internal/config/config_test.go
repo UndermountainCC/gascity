@@ -6459,6 +6459,58 @@ name = "a"
 	}
 }
 
+func TestParseSessionHybridLegs(t *testing.T) {
+	t.Run("configured", func(t *testing.T) {
+		toml := `
+[workspace]
+name = "test"
+
+[session]
+provider = "hybrid"
+remote_match = "pod-"
+
+[session.hybrid]
+local = "herdr"
+remote = "k8s"
+
+[[agent]]
+name = "a"
+`
+		cfg, err := Parse([]byte(toml))
+		if err != nil {
+			t.Fatalf("Parse: %v", err)
+		}
+		if got := cfg.Session.Hybrid.Local; got != "herdr" {
+			t.Errorf("Session.Hybrid.Local = %q, want %q", got, "herdr")
+		}
+		if got := cfg.Session.Hybrid.Remote; got != "k8s" {
+			t.Errorf("Session.Hybrid.Remote = %q, want %q", got, "k8s")
+		}
+		if got := cfg.Session.RemoteMatch; got != "pod-" {
+			t.Errorf("Session.RemoteMatch = %q, want %q", got, "pod-")
+		}
+	})
+	t.Run("absent", func(t *testing.T) {
+		toml := `
+[workspace]
+name = "test"
+
+[session]
+provider = "hybrid"
+
+[[agent]]
+name = "a"
+`
+		cfg, err := Parse([]byte(toml))
+		if err != nil {
+			t.Fatalf("Parse: %v", err)
+		}
+		if cfg.Session.Hybrid != (HybridSessionConfig{}) {
+			t.Errorf("Session.Hybrid = %+v, want zero value", cfg.Session.Hybrid)
+		}
+	})
+}
+
 func TestNudgePollIntervalDurationUnsetOrInvalid(t *testing.T) {
 	cases := []struct {
 		name  string

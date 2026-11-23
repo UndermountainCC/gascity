@@ -1952,6 +1952,21 @@
       ],
       "description": "GitHubPRMonitorPatch modifies an existing GitHub PR readiness monitor by name."
     },
+    "HybridSessionConfig": {
+      "properties": {
+        "local": {
+          "type": "string",
+          "description": "Local names the session runtime for sessions that do not match the\nremote pattern: a builtin runtime name such as \"tmux\" or \"herdr\", or an\n\"exec:\"/\"ssh:\" selection. Empty means \"tmux\". It may not be \"hybrid\" or\na pack-declared [runtimes.\u003cname\u003e] runtime, and it must differ from the\nremote leg. \"local\" and \"remote\" name the routing branches only."
+        },
+        "remote": {
+          "type": "string",
+          "description": "Remote names the session runtime for sessions whose name contains the\nremote pattern (remote_match / GC_HYBRID_REMOTE_MATCH). Empty means\n\"k8s\". Same rules as local."
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "description": "HybridSessionConfig selects the two backends of the hybrid session provider."
+    },
     "Import": {
       "properties": {
         "source": {
@@ -3092,7 +3107,7 @@
       "properties": {
         "provider": {
           "type": "string",
-          "description": "Provider selects the session backend: \"fake\", \"fail\", \"subprocess\",\n\"acp\", \"exec:\u003cscript\u003e\", \"k8s\", or \"\" (default: tmux)."
+          "description": "Provider selects the session backend: \"fake\", \"fail\", \"subprocess\",\n\"acp\", \"exec:\u003cscript\u003e\", \"k8s\", \"herdr\", \"hybrid\", or \"\" (default:\ntmux)."
         },
         "k8s": {
           "$ref": "#/$defs/K8sConfig",
@@ -3101,6 +3116,10 @@
         "acp": {
           "$ref": "#/$defs/ACPSessionConfig",
           "description": "ACP holds settings for the ACP (Agent Client Protocol) session provider."
+        },
+        "hybrid": {
+          "$ref": "#/$defs/HybridSessionConfig",
+          "description": "Hybrid selects the local and remote legs of the hybrid session provider."
         },
         "setup_timeout": {
           "type": "string",
@@ -3160,7 +3179,7 @@
         },
         "remote_match": {
           "type": "string",
-          "description": "RemoteMatch is a substring pattern for the hybrid provider to route\nsessions to the remote (K8s) backend. Sessions whose names contain\nthis pattern go to K8s; all others stay local (tmux).\nOverridden by the GC_HYBRID_REMOTE_MATCH env var if set."
+          "description": "RemoteMatch is a substring pattern for the hybrid provider to route\nsessions to its remote leg ([session.hybrid] remote, default k8s).\nSessions whose names contain this pattern go to the remote leg; all\nothers go to the local leg ([session.hybrid] local, default tmux).\nOverridden by the GC_HYBRID_REMOTE_MATCH env var if set."
         },
         "program_status": {
           "type": "string",

@@ -1745,12 +1745,15 @@ const ProgressStallTimeoutMinimum = 5 * time.Minute
 // SessionConfig holds session provider settings.
 type SessionConfig struct {
 	// Provider selects the session backend: "fake", "fail", "subprocess",
-	// "acp", "exec:<script>", "k8s", or "" (default: tmux).
+	// "acp", "exec:<script>", "k8s", "herdr", "hybrid", or "" (default:
+	// tmux).
 	Provider string `toml:"provider,omitempty"`
 	// K8s holds Kubernetes-specific settings for the native K8s provider.
 	K8s K8sConfig `toml:"k8s,omitempty"`
 	// ACP holds settings for the ACP (Agent Client Protocol) session provider.
 	ACP ACPSessionConfig `toml:"acp,omitempty"`
+	// Hybrid selects the local and remote legs of the hybrid session provider.
+	Hybrid HybridSessionConfig `toml:"hybrid,omitempty"`
 	// SetupTimeout is the per-command/script timeout for session setup and
 	// pre_start commands. Duration string (e.g., "10s", "30s"). Defaults to "10s".
 	SetupTimeout string `toml:"setup_timeout,omitempty" jsonschema:"default=10s"`
@@ -1816,8 +1819,9 @@ type SessionConfig struct {
 	// to override.
 	Socket string `toml:"socket,omitempty"`
 	// RemoteMatch is a substring pattern for the hybrid provider to route
-	// sessions to the remote (K8s) backend. Sessions whose names contain
-	// this pattern go to K8s; all others stay local (tmux).
+	// sessions to its remote leg ([session.hybrid] remote, default k8s).
+	// Sessions whose names contain this pattern go to the remote leg; all
+	// others go to the local leg ([session.hybrid] local, default tmux).
 	// Overridden by the GC_HYBRID_REMOTE_MATCH env var if set.
 	RemoteMatch string `toml:"remote_match,omitempty"`
 	// ProgramStatus is the city switch for OSC 7501 program status. "off"
@@ -1942,6 +1946,21 @@ func (s *SessionConfig) DisplayMsOrDefault() int {
 		return 5000
 	}
 	return *s.DisplayMs
+}
+
+// HybridSessionConfig selects the two backends of the hybrid session
+// provider. It is read only when [session] provider is "hybrid".
+type HybridSessionConfig struct {
+	// Local names the session runtime for sessions that do not match the
+	// remote pattern: a builtin runtime name such as "tmux" or "herdr", or an
+	// "exec:"/"ssh:" selection. Empty means "tmux". It may not be "hybrid" or
+	// a pack-declared [runtimes.<name>] runtime, and it must differ from the
+	// remote leg. "local" and "remote" name the routing branches only.
+	Local string `toml:"local,omitempty"`
+	// Remote names the session runtime for sessions whose name contains the
+	// remote pattern (remote_match / GC_HYBRID_REMOTE_MATCH). Empty means
+	// "k8s". Same rules as local.
+	Remote string `toml:"remote,omitempty"`
 }
 
 // ACPSessionConfig holds settings for the ACP session provider.
