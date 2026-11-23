@@ -24,6 +24,7 @@ package main
 import (
 	"fmt"
 	"io"
+	"slices"
 	"sync"
 	"time"
 
@@ -92,6 +93,7 @@ func closeAllowed(sw *SeatWork, info sessionpkg.Info, why closeWhy) (string, err
 		return causeHasWork, err
 	}
 	late, err := lateSeatWork(sw.Legs(), scope, seatWorkStatuses, why.keep)
+	late = heldUnderRecordedStatus(late, seatWorkStatuses)
 	switch {
 	case err != nil:
 		return causeHasWork, fmt.Errorf("re-reading its work: %w", err)
@@ -99,6 +101,26 @@ func closeAllowed(sw *SeatWork, info sessionpkg.Info, why closeWhy) (string, err
 		return causeHasWork, fmt.Errorf("%s was assigned to it since this tick's read", late[0].bead.ID)
 	}
 	return "", nil
+}
+
+// heldUnderRecordedStatus keeps the re-read's hits that the tick's read could
+// list: rows with no recorded status (Bead.SourceStatus) or recorded under one
+// of statuses. A bd-backed leg's re-read answers from its cache, which filters
+// on the folded status and so lists a claim bd records as blocked or deferred
+// under "open", while the tick's live read (`bd list --status=<s>`) matches
+// the recorded one. Without this, a seat whose only claims are recorded
+// blocked passes the tick's read as holding no work, and the re-read refuses
+// its close as a claim made since that read, on every tick, so the seat keeps
+// its pool slot or canonical name. Only the gated close filters: a releasing
+// close's cascade still re-reads and releases what the cache lists.
+func heldUnderRecordedStatus(hits []seatWorkHit, statuses []string) []seatWorkHit {
+	kept := hits[:0:0]
+	for _, h := range hits {
+		if h.bead.SourceStatus == "" || slices.Contains(statuses, h.bead.SourceStatus) {
+			kept = append(kept, h)
+		}
+	}
+	return kept
 }
 
 // closeSeat is every legacy close: closeAllowed, then the commit and its
