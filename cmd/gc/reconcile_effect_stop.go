@@ -274,8 +274,16 @@ func workLadderOn(w *World) bool {
 // unreadable: each way the stop is, or may be, the ladder's, which keeps the
 // claim.
 func x7Releases(w *World, meta map[string]string) bool {
+	return !workLadderOn(w) && stalledMarkerReleases(meta)
+}
+
+// stalledMarkerReleases is x7Releases short of the ladder switch, which the
+// legacy reconciler, running no ladder, does not read: a marker the
+// backstops wrote for the row's own incarnation, and no work_ladder cell
+// recording a recycle at the row's generation, or unreadable.
+func stalledMarkerReleases(meta map[string]string) bool {
 	token := strings.TrimSpace(meta["instance_token"])
-	if workLadderOn(w) || token == "" || strings.TrimSpace(meta[executionClaimNudgeTokenKey]) != token {
+	if token == "" || strings.TrimSpace(meta[executionClaimNudgeTokenKey]) != token {
 		return false
 	}
 	// A recycle the ladder asked for at this generation, with the switch
@@ -315,6 +323,9 @@ func releaseStalledClaim(r *closeReleases, c stalledClaim) {
 		// route kept, its release fenced on its status and assignee.
 		out := releaseListed([]seatWorkHit{hit}, releaseStalled, releaseSeatOfInfo(c.row), r.cfg, ReleaseOpts{})
 		logRelease(r.stderr, "execution-stalled", c.row.ID, out, nil)
+		for _, released := range out.Released {
+			clearStoppedSeatIdentity(released, c.row, r.stderr)
+		}
 	}
 }
 
