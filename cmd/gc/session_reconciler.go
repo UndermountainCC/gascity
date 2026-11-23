@@ -3000,7 +3000,13 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 					if isPoolManagedSessionInfo(infoByID[id]) {
 						gate = closeFreeSlot
 					}
-					closed, cause := closeSeatFor(store, sw, infoByID[id], closeWhy{reason: reason, gate: gate}, clk.Now().UTC(), stderr)
+					why := closeWhy{reason: reason, gate: gate}
+					if reason == "orphaned" && closesAsExecutionStalled(infoByID[id], cfg) {
+						// A configured pool seat an execution-stalled drain stopped:
+						// its agent was never removed, so the close names the drain.
+						why = closeWhy{reason: executionStalledDrainReason, gate: closeFreeSlot}
+					}
+					closed, cause := closeSeatFor(store, sw, infoByID[id], why, clk.Now().UTC(), stderr)
 					// An operator's suspend keeps the seat whole: its claims are
 					// not released, nor is it closed through the releasing gate.
 					if !closed && reason == "orphaned" && cause != causeKeepsSlot {
@@ -5357,7 +5363,9 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 	// Planned starts already ran. Drop suspend drains that the resume made
 	// stale before the scan can arm GC_DRAIN_ACK on the replacement process.
 	cancelResumedSuspendDrains(dt, sp, infoLookup, wakeEvals, cfg, citySuspendedWithState(cfg, suspState), trace)
-	advanceSessionDrainsWithSessionsTraced(cityPath, dt, sp, store, infoLookup, wakeEvals, cfg, clk, trace)
+	for _, stalled := range advanceSessionDrainsWithSessionsTraced(cityPath, dt, sp, store, infoLookup, wakeEvals, cfg, clk, trace) {
+		releaseExecutionStalledDrainClaim(sessStore, sw, cfg, stalled, stderr)
+	}
 	clearMissingIdleProbes(dt, infoByID)
 	// Drain-skip lines print on transition (session_drain_skip_log.go); a
 	// session this pass saw without a skip is re-armed here.

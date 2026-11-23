@@ -23,9 +23,9 @@ import (
 // would trade an accidental recovery for none at all.
 //
 // The chain: exhaustion -> TRACKED drain (non-cancelable reason) -> reconciler
-// advances it -> runtime stops -> session bead closes -> the dead-assignee
-// reopen lane releases the claim -> the row is demand again -> a fresh seat
-// claims it.
+// advances it -> runtime stops -> the stalled claim is given back -> the
+// session bead's gated close finds no work and closes -> the row is demand
+// again -> a fresh seat claims it.
 
 type stalledConvergenceHarness struct {
 	env         *reconcilerTestEnv
@@ -37,8 +37,21 @@ type stalledConvergenceHarness struct {
 
 func newStalledConvergenceHarness(t *testing.T) *stalledConvergenceHarness {
 	t.Helper()
+	return newStalledConvergenceHarnessWith(t, false)
+}
+
+// newStalledConvergenceHarnessWith is newStalledConvergenceHarness; with
+// singleton set, the pool is a canonical singleton (max 1) whose seat carries
+// the template as its stable alias and holds the claim under that alias, the
+// shape a singleton pool's `gc hook --claim` leaves.
+func newStalledConvergenceHarnessWith(t *testing.T, singleton bool) *stalledConvergenceHarness {
+	t.Helper()
 	env := newReconcilerTestEnv(t)
 	template := "worker"
+	maxActive := 2
+	if singleton {
+		maxActive = 1
+	}
 	env.cfg = &config.City{
 		Workspace: config.Workspace{Name: "test-city"},
 		Agents: []config.Agent{{
@@ -46,7 +59,7 @@ func newStalledConvergenceHarness(t *testing.T) *stalledConvergenceHarness {
 			StartCommand:      "true",
 			Nudge:             "gc hook --claim --drain-ack --json",
 			MinActiveSessions: intPtr(0),
-			MaxActiveSessions: intPtr(2),
+			MaxActiveSessions: intPtr(maxActive),
 		}},
 	}
 
@@ -59,10 +72,15 @@ func newStalledConvergenceHarness(t *testing.T) *stalledConvergenceHarness {
 	}
 	h := &stalledConvergenceHarness{env: env, template: template, sessionID: info.ID, sessionName: info.SessionName}
 
-	if err := env.store.SetMetadataBatch(info.ID, map[string]string{
+	seatMeta := map[string]string{
 		"pool_managed": "true",
 		"state":        "active",
-	}); err != nil {
+	}
+	if singleton {
+		seatMeta["alias"] = template
+		seatMeta["pool_slot"] = "1"
+	}
+	if err := env.store.SetMetadataBatch(info.ID, seatMeta); err != nil {
 		t.Fatalf("marking the session pool-managed: %v", err)
 	}
 	// Let the reconciler start the seat itself, so the runtime, the session bead
@@ -88,7 +106,11 @@ func newStalledConvergenceHarness(t *testing.T) *stalledConvergenceHarness {
 		t.Fatalf("seeding work: %v", err)
 	}
 	inProgress := "in_progress"
-	if err := env.store.Update(work.ID, beads.UpdateOpts{Status: &inProgress, Assignee: &h.sessionName}); err != nil {
+	assignee := h.sessionName
+	if singleton {
+		assignee = template
+	}
+	if err := env.store.Update(work.ID, beads.UpdateOpts{Status: &inProgress, Assignee: &assignee}); err != nil {
 		t.Fatalf("claiming work: %v", err)
 	}
 	h.work, _ = env.store.Get(work.ID)
@@ -142,7 +164,6 @@ func (h *stalledConvergenceHarness) runBackstopToExhaustion(t *testing.T) {
 
 // TestExecutionStalledDrainConvergesToAReclaimableRow is the end-to-end chain.
 func TestExecutionStalledDrainConvergesToAReclaimableRow(t *testing.T) {
-	city := t.TempDir()
 	h := newStalledConvergenceHarness(t)
 
 	h.runBackstopToExhaustion(t)
@@ -169,28 +190,15 @@ func TestExecutionStalledDrainConvergesToAReclaimableRow(t *testing.T) {
 			h.env.stdout.String(), h.env.stderr.String())
 	}
 
-	// Retire the session bead the way the reconciler's stop path does, then let
-	// the dead-assignee reopen lane run: the claim must come back as claimable
-	// work rather than staying held by a session that no longer exists.
-	if err := h.env.store.Close(h.sessionID); err != nil {
-		t.Fatalf("closing the drained session bead: %v", err)
-	}
-	claimed, err := h.env.store.Get(h.work.ID)
-	if err != nil {
-		t.Fatalf("re-reading the claim: %v", err)
-	}
-	released := releaseOrphanedPoolAssignments(h.env.store, beads.SessionStore{Store: h.env.store}, h.env.cfg, city, nil,
-		[]beads.Bead{claimed}, []beads.Store{h.env.store}, []string{""}, nil, nil, nil, nil)
-	if len(released) != 1 || released[0].ID != h.work.ID {
-		t.Fatalf("released = %+v, want the stalled claim reopened", released)
-	}
-
+	// The scan that saw the runtime exit gave the stalled claim back: the claim
+	// is claimable work again, not held by a seat that will never run it.
 	reopened, err := h.env.store.Get(h.work.ID)
 	if err != nil {
 		t.Fatalf("re-reading the reopened row: %v", err)
 	}
 	if !strings.EqualFold(strings.TrimSpace(reopened.Status), "open") || strings.TrimSpace(reopened.Assignee) != "" {
-		t.Fatalf("reopened row = status %q assignee %q, want open and unassigned", reopened.Status, reopened.Assignee)
+		t.Fatalf("reopened row = status %q assignee %q, want open and unassigned; stderr=%s",
+			reopened.Status, reopened.Assignee, h.env.stderr.String())
 	}
 
 	// And the loop closes: the row is countable demand again, so a fresh seat is
@@ -201,6 +209,157 @@ func TestExecutionStalledDrainConvergesToAReclaimableRow(t *testing.T) {
 	}
 	if !hookClaimMatchesRoute(reopened, hookClaimRouteTargets(h.template)) {
 		t.Fatal("the reopened row is not claimable by a worker for its template")
+	}
+}
+
+// TestExecutionStalledDrainGivesBackItsClaimAndFreesTheSeat is the chain
+// without the hand-close above: the reconciler alone must take the claim off
+// the stopped seat and close it. The session bead's gated close refuses while
+// the claim is assigned to the seat, and the dead-assignee reopen lane skips a
+// claim whose seat bead is still open, so a completed execution-stalled drain
+// that keeps its claim leaves the seat asleep holding the work and, on a
+// singleton pool, holding the canonical name the replacement needs (in the field:
+// "close of ... refused (has-work)" and "canonical pool template ... is held
+// by session ..." on every tick). The singleton case holds the claim under
+// the pool's stable alias, as a singleton seat's claim does.
+func TestExecutionStalledDrainGivesBackItsClaimAndFreesTheSeat(t *testing.T) {
+	for _, tt := range []struct {
+		name      string
+		singleton bool
+	}{
+		{"pool seat", false},
+		{"singleton seat holding the claim under its alias", true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			h := newStalledConvergenceHarnessWith(t, tt.singleton)
+			if err := h.env.store.SetMetadataBatch(h.work.ID, map[string]string{
+				beadmeta.SessionIDMetadataKey:   h.sessionID,
+				beadmeta.SessionNameMetadataKey: h.sessionName,
+			}); err != nil {
+				t.Fatalf("stamping the claim's session identity: %v", err)
+			}
+
+			h.runBackstopToExhaustion(t)
+			if ds := h.env.dt.get(h.sessionID); ds == nil || ds.reason != executionStalledDrainReason {
+				t.Fatalf("drain after exhaustion = %+v, want a tracked execution-stalled drain", ds)
+			}
+
+			// The reconciler advances the drain to a stop, then keeps ticking with
+			// the seat no longer desired: the claim it holds is not demand, and
+			// nothing else asks for the seat.
+			for i := 0; i < 6 && h.env.sp.IsRunning(h.sessionName); i++ {
+				h.env.clk.Advance(defaultDrainTimeout + time.Minute)
+				sessions, err := loadSessionBeads(h.env.store)
+				if err != nil {
+					t.Fatalf("loading session beads: %v", err)
+				}
+				h.env.reconcile(sessions)
+			}
+			if h.env.sp.IsRunning(h.sessionName) {
+				t.Fatalf("the runtime is still running after the drain advanced; stdout=%s stderr=%s",
+					h.env.stdout.String(), h.env.stderr.String())
+			}
+			h.env.desiredState = map[string]TemplateParams{}
+			for i := 0; i < 3; i++ {
+				h.env.clk.Advance(time.Minute)
+				sessions, err := loadSessionBeads(h.env.store)
+				if err != nil {
+					t.Fatalf("loading session beads: %v", err)
+				}
+				h.env.reconcile(sessions)
+			}
+
+			work, err := h.env.store.Get(h.work.ID)
+			if err != nil {
+				t.Fatalf("re-reading the claim: %v", err)
+			}
+			if work.Status != "open" || strings.TrimSpace(work.Assignee) != "" {
+				t.Fatalf("claim = status %q assignee %q, want it given back open and unassigned; stdout=%s stderr=%s",
+					work.Status, work.Assignee, h.env.stdout.String(), h.env.stderr.String())
+			}
+			if strings.Contains(h.env.stderr.String(), "refused (has-work)") {
+				t.Fatalf("the seat's close was refused for the claim the drain stopped it for; stderr=%s", h.env.stderr.String())
+			}
+			seat := h.sessionBead(t)
+			if seat.Status != "closed" {
+				t.Fatalf("seat status = %q, want closed so its slot and name free up; stdout=%s stderr=%s",
+					seat.Status, h.env.stdout.String(), h.env.stderr.String())
+			}
+			// The agent was never removed: the close names the drain's cause.
+			if got := seat.Metadata["close_reason"]; got != sessionpkg.CanonicalCloseReason(executionStalledDrainReason) {
+				t.Fatalf("seat close_reason = %q, want %q", got, sessionpkg.CanonicalCloseReason(executionStalledDrainReason))
+			}
+			for _, key := range []string{beadmeta.SessionIDMetadataKey, beadmeta.SessionNameMetadataKey} {
+				if v := strings.TrimSpace(work.Metadata[key]); v != "" {
+					t.Errorf("given-back claim still carries %s=%q, naming the stopped seat", key, v)
+				}
+			}
+			templates := map[string]struct{}{h.template: {}}
+			if _, servable := demandServableForTemplates(h.env.cfg, work, templates); !servable {
+				t.Fatal("the given-back claim is not demand for its template; no fresh seat is minted for it")
+			}
+		})
+	}
+}
+
+// TestIdleSeatWithAStaleSessionStampOnUnassignedWorkCloses pins the other
+// shape reported alongside the execution-stalled drain: a stopped, idle
+// singleton seat (no drain) while a routed bead it once claimed is open and
+// unassigned but still carries the seat's gc.session_id and gc.session_name.
+// The stamps are not a claim: the seat's gated close counts only work
+// assigned to it, so it closes instead of being refused (has-work), and the
+// bead stays demand for its template, so has-work and pool demand agree on
+// it.
+func TestIdleSeatWithAStaleSessionStampOnUnassignedWorkCloses(t *testing.T) {
+	h := newStalledConvergenceHarnessWith(t, true)
+	open, unassigned := "open", ""
+	if err := h.env.store.Update(h.work.ID, beads.UpdateOpts{
+		Status:   &open,
+		Assignee: &unassigned,
+		Metadata: map[string]string{
+			beadmeta.SessionIDMetadataKey:   h.sessionID,
+			beadmeta.SessionNameMetadataKey: h.sessionName,
+		},
+	}); err != nil {
+		t.Fatalf("leaving the stale stamps on unassigned work: %v", err)
+	}
+	if err := h.env.sp.Stop(h.sessionName); err != nil {
+		t.Fatalf("stopping the idle seat's runtime: %v", err)
+	}
+	if err := h.env.store.SetMetadataBatch(h.sessionID, map[string]string{
+		"state":        "asleep",
+		"sleep_reason": "idle",
+	}); err != nil {
+		t.Fatalf("marking the seat asleep: %v", err)
+	}
+
+	h.env.desiredState = map[string]TemplateParams{}
+	for i := 0; i < 3; i++ {
+		h.env.clk.Advance(time.Minute)
+		sessions, err := loadSessionBeads(h.env.store)
+		if err != nil {
+			t.Fatalf("loading session beads: %v", err)
+		}
+		h.env.reconcile(sessions)
+	}
+
+	if strings.Contains(h.env.stderr.String(), "refused (has-work)") {
+		t.Fatalf("the idle seat's close was refused for unassigned work; stderr=%s", h.env.stderr.String())
+	}
+	if seat := h.sessionBead(t); seat.Status != "closed" {
+		t.Fatalf("seat status = %q, want closed so its slot and name free up; stdout=%s stderr=%s",
+			seat.Status, h.env.stdout.String(), h.env.stderr.String())
+	}
+	work, err := h.env.store.Get(h.work.ID)
+	if err != nil {
+		t.Fatalf("re-reading the work: %v", err)
+	}
+	if work.Status != "open" || strings.TrimSpace(work.Assignee) != "" {
+		t.Fatalf("work = status %q assignee %q, want it left open and unassigned", work.Status, work.Assignee)
+	}
+	templates := map[string]struct{}{h.template: {}}
+	if _, servable := demandServableForTemplates(h.env.cfg, work, templates); !servable {
+		t.Fatal("unassigned work with a stale session stamp is not demand for its template")
 	}
 }
 
