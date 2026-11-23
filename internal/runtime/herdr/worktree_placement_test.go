@@ -30,9 +30,13 @@ import (
 //   - worktrees.json: the whole `worktree list` reply
 //   - unsupported: every `worktree` verb fails as an older herdr does
 //   - open_error: `worktree open` prints the file's contents on stderr and exits 1
+//   - open_error_<ws>: `worktree open --workspace <ws>` does the same
 //   - open_ws: the worktree workspace w2 is open, so `worktree open` reports
 //     already_open with w2's active tab
 //   - rig_ws: `workspace list` reports workspace w1 with the file's contents as label
+//   - workspaces.json: the whole `workspace list` reply, ahead of rig_ws
+//   - create_ws: `workspace create` answers with the file's contents as the new
+//     workspace id (and <id>:t1, <id>:p1) instead of w1
 //   - tabs_<ws>: the `tab list --workspace <ws>` reply
 //   - ws_gone_<ws>: the next `tab list --workspace <ws>` fails with
 //     workspace_not_found, once
@@ -71,6 +75,7 @@ case "$1 $2" in
 "worktree list") cat "$STATE/worktrees.json" ;;
 "worktree open")
 	if [ -e "$STATE/open_error" ]; then cat "$STATE/open_error" >&2; exit 1; fi
+	if [ -e "$STATE/open_error_$4" ]; then cat "$STATE/open_error_$4" >&2; exit 1; fi
 	if [ -e "$STATE/open_ws" ]; then
 		printf '%s' '{"result":{"type":"worktree_opened","already_open":true,"workspace":{"workspace_id":"w2"},"tab":{"tab_id":"w2:t-active"},"root_pane":{"pane_id":"w2:p-active"}}}'
 	else
@@ -78,12 +83,17 @@ case "$1 $2" in
 		printf '%s' '{"result":{"type":"worktree_opened","already_open":false,"workspace":{"workspace_id":"w2"},"tab":{"tab_id":"w2:t1"},"root_pane":{"pane_id":"w2:p1"}}}'
 	fi ;;
 "workspace list")
-	if [ -e "$STATE/rig_ws" ]; then
+	if [ -e "$STATE/workspaces.json" ]; then
+		cat "$STATE/workspaces.json"
+	elif [ -e "$STATE/rig_ws" ]; then
 		printf '{"result":{"workspaces":[{"workspace_id":"w1","label":"%s"}]}}' "$(cat "$STATE/rig_ws")"
 	else
 		printf '%s' '{"result":{"workspaces":[]}}'
 	fi ;;
-"workspace create") printf '%s' '{"result":{"workspace":{"workspace_id":"w1"},"tab":{"tab_id":"w1:t1"},"root_pane":{"pane_id":"w1:p1"}}}' ;;
+"workspace create")
+	ws=w1
+	if [ -e "$STATE/create_ws" ]; then ws=$(cat "$STATE/create_ws"); fi
+	printf '{"result":{"workspace":{"workspace_id":"%s"},"tab":{"tab_id":"%s:t1"},"root_pane":{"pane_id":"%s:p1"}}}' "$ws" "$ws" "$ws" ;;
 "tab list")
 	if [ -e "$STATE/ws_gone_$4" ]; then
 		rm -f "$STATE/ws_gone_$4"
@@ -163,7 +173,7 @@ func (f *fakeWorktreeHerdr) listWorktrees(t *testing.T, repo string, entries ...
 	all := append([]worktreeEntry{{Path: repo}}, entries...)
 	reply := map[string]any{"result": map[string]any{
 		"type":       "worktree_list",
-		"source":     map[string]any{"repo_root": repo, "source_checkout_path": repo},
+		"source":     map[string]any{"repo_root": repo, "repo_name": filepath.Base(repo), "source_checkout_path": repo},
 		"worktrees":  all,
 		"repo_label": filepath.Base(repo),
 	}}
@@ -495,6 +505,9 @@ func TestWorktreePlacementFallsBackToTab(t *testing.T) {
 		setup        func(t *testing.T, f *fakeWorktreeHerdr) (workDir string)
 		worktreeCall bool
 		diagnostic   bool
+		// repoCreate is the id of the repository workspace the case creates
+		// and must close again, or "" when it creates none.
+		repoCreate string
 	}{
 		{
 			name: "primary checkout",
@@ -536,11 +549,24 @@ func TestWorktreePlacementFallsBackToTab(t *testing.T) {
 			setup: func(t *testing.T, f *fakeWorktreeHerdr) string {
 				repo, wt := linkedWorktreeLayout(t)
 				f.listWorktrees(t, repo, worktreeEntry{Path: wt, IsLinkedWorktree: true})
-				f.set(t, "open_error", `{"error":{"code":"not_git_worktree","message":"worktree operations require a workspace inside a Git work tree"}}`)
+				f.set(t, "open_error", `{"error":{"code":"internal_error","message":"worktree open failed"}}`)
 				return wt
 			},
 			worktreeCall: true,
 			diagnostic:   true,
+		},
+		{
+			name: "not_git_worktree from every source",
+			setup: func(t *testing.T, f *fakeWorktreeHerdr) string {
+				repo, wt := linkedWorktreeLayout(t)
+				f.listWorktrees(t, repo, worktreeEntry{Path: wt, IsLinkedWorktree: true})
+				f.set(t, "open_error", `{"error":{"code":"not_git_worktree","message":"worktree operations require a workspace inside a Git work tree"}}`)
+				f.set(t, "create_ws", "wR")
+				return wt
+			},
+			worktreeCall: true,
+			diagnostic:   true,
+			repoCreate:   "wR",
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -575,6 +601,18 @@ func TestWorktreePlacementFallsBackToTab(t *testing.T) {
 			}
 			if got := strings.Contains(diag, "herdr: worktree placement for"); got != tc.diagnostic {
 				t.Errorf("diagnostic written = %t, want %t; stderr:\n%s", got, tc.diagnostic, diag)
+			}
+			if tc.repoCreate == "" {
+				if callIndex(calls, "workspace create") >= 0 || callIndex(calls, "workspace close") >= 0 {
+					t.Errorf("created or closed a workspace; log:\n%s", log)
+				}
+			} else {
+				createIdx := callIndex(calls, "workspace create")
+				closeIdx := callIndex(calls, "workspace close "+tc.repoCreate)
+				fallbackIdx := callIndex(calls, "tab create --workspace w1")
+				if createIdx < 0 || closeIdx < createIdx || fallbackIdx < closeIdx {
+					t.Errorf("repository workspace %s must be created, then closed before the tab fallback; log:\n%s", tc.repoCreate, log)
+				}
 			}
 		})
 	}
@@ -765,8 +803,28 @@ func TestWorktreeClientDecoding(t *testing.T) {
 	if err != nil {
 		t.Fatalf("worktreeList: %v", err)
 	}
-	if src.RepoRoot != repo || len(entries) != 2 || entries[1] != (worktreeEntry{Path: wt, IsLinkedWorktree: true, OpenWorkspaceID: "w7"}) {
+	if src.RepoRoot != repo || src.RepoName != filepath.Base(repo) || len(entries) != 2 || entries[1] != (worktreeEntry{Path: wt, IsLinkedWorktree: true, OpenWorkspaceID: "w7"}) {
 		t.Errorf("worktreeList = %+v, %+v", src, entries)
+	}
+
+	// herdr 0.9.5's `workspace list` shape, measured: a git-rooted workspace
+	// carries a worktree object, one outside git none.
+	f.set(t, "workspaces.json", `{"id":"cli:workspace:list","result":{"type":"workspace_list","workspaces":[`+
+		`{"active_tab_id":"w6N:t9","label":"city","workspace_id":"w6N"},`+
+		`{"label":"infra","workspace_id":"w6P","worktree":{"checkout_path":"`+repo+`","is_linked_worktree":false,"repo_key":"`+repo+`/.git","repo_name":"infra","repo_root":"`+repo+`"}}]}}`)
+	all, err := c.listWorkspaces(context.Background())
+	if err != nil || len(all) != 2 || all[0].Worktree != nil || all[1].Worktree == nil ||
+		*all[1].Worktree != (workspaceWorktree{RepoRoot: repo, CheckoutPath: repo}) {
+		t.Errorf("listWorkspaces = %+v, %v", all, err)
+	}
+	if ws, created, err := c.repoWorkspace(context.Background(), src); err != nil || ws != "w6P" || created {
+		t.Errorf("repoWorkspace = %q, %t, %v; want w6P, false", ws, created, err)
+	}
+	if _, _, err := c.repoWorkspace(context.Background(), worktreeSource{}); err == nil {
+		t.Error("repoWorkspace without a repository root succeeded")
+	}
+	if err := os.Remove(filepath.Join(f.state, "workspaces.json")); err != nil {
+		t.Fatal(err)
 	}
 
 	ws, tab, already, err := c.worktreeOpen(context.Background(), "w1", wt, "chat")
@@ -788,5 +846,148 @@ func TestWorktreeClientDecoding(t *testing.T) {
 	f.set(t, "worktrees.json", `{"result":{"worktrees":"not a list"}}`)
 	if _, _, err := c.worktreeList(context.Background(), wt); err == nil || !strings.Contains(err.Error(), "herdr worktree list: decode") {
 		t.Errorf("worktreeList on a bad reply = %v; want a decode error", err)
+	}
+}
+
+// citySessionName is a town-level session with no rig: its workspace label is
+// the town, "city".
+const citySessionName = "city__chat"
+
+// workspacesReply is a `workspace list` reply; a repo of "" leaves the
+// workspace without herdr's worktree field, as for a cwd outside git.
+func workspacesReply(t *testing.T, ws ...[3]string) string {
+	t.Helper()
+	var list []map[string]any
+	for _, w := range ws {
+		e := map[string]any{"workspace_id": w[0], "label": w[1]}
+		if w[2] != "" {
+			e["worktree"] = map[string]any{"repo_root": w[2], "checkout_path": w[2], "is_linked_worktree": false}
+		}
+		list = append(list, e)
+	}
+	b, err := json.Marshal(map[string]any{"result": map[string]any{"type": "workspace_list", "workspaces": list}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(b)
+}
+
+// notGitWorktree is herdr's refusal to open a worktree from a workspace whose
+// cwd is not inside a git work tree.
+const notGitWorktree = `{"error":{"code":"not_git_worktree","message":"Herdr worktree actions require a workspace inside a Git work tree"}}`
+
+// TestWorktreePlacementCityAgentOpensFromRepoWorkspace pins gcs-hxuq: a city
+// agent (no rig) whose work dir is a linked worktree of a repository outside
+// the city workspace has its worktree opened from a new workspace at the
+// repository root, labeled with the repository's name, once herdr refuses the
+// city workspace as the source. The session's stale tab from an earlier
+// tab-placed life in the city workspace is closed after the agent tab exists,
+// and the repository workspace stays.
+func TestWorktreePlacementCityAgentOpensFromRepoWorkspace(t *testing.T) {
+	repo, wt := linkedWorktreeLayout(t)
+	f := newFakeWorktreeHerdr(t)
+	f.set(t, "workspaces.json", workspacesReply(t, [3]string{"wC", "city", ""}))
+	f.set(t, "open_error_wC", notGitWorktree)
+	f.set(t, "create_ws", "wR")
+	f.set(t, "tabs_wC", `{"result":{"tabs":[{"tab_id":"wC:t-old","label":"chat"},{"tab_id":"wC:t-other","label":"mayor"}]}}`)
+	f.listWorktrees(t, repo, worktreeEntry{Path: wt, IsLinkedWorktree: true})
+	p := newWorktreeProvider(t, f)
+
+	var err error
+	diag := captureStderr(t, func() {
+		err = p.start(context.Background(), citySessionName, worktreeStartConfig(wt))
+	})
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	calls := f.calls(t)
+	log := strings.Join(calls, "\n")
+	refusedIdx := callIndex(calls, "worktree open --workspace wC --path "+wt)
+	createIdx := callIndex(calls, "workspace create --label "+filepath.Base(repo)+" --no-focus --cwd "+repo)
+	openIdx := callIndex(calls, "worktree open --workspace wR --path "+wt+" --label chat --no-focus")
+	if refusedIdx < 0 || createIdx < refusedIdx || openIdx < createIdx {
+		t.Fatalf("want open from the city workspace, then a repository workspace at %s, then open from it; log:\n%s", repo, log)
+	}
+	if strings.Contains(calls[createIdx], "--env") {
+		t.Errorf("repository workspace carries the agent's env: %s", calls[createIdx])
+	}
+	tabIdx := callIndex(calls, "tab create --workspace w2 --label chat --cwd "+wt)
+	if tabIdx < 0 {
+		t.Fatalf("no agent tab in the worktree workspace; log:\n%s", log)
+	}
+	if callIndex(calls, "tab create --workspace wC") >= 0 || callIndex(calls, "tab create --workspace wR") >= 0 {
+		t.Errorf("the agent landed in a tab outside the worktree workspace; log:\n%s", log)
+	}
+	if closeIdx := callIndex(calls, "tab close wC:t-old"); closeIdx < tabIdx {
+		t.Errorf("stale city tab must close after the agent tab is created; log:\n%s", log)
+	}
+	if callIndex(calls, "tab close wC:t-other") >= 0 || callIndex(calls, "workspace close") >= 0 {
+		t.Errorf("closed something that is not the session's; log:\n%s", log)
+	}
+	if got, _ := p.GetMeta(citySessionName, metaBoundWorkspace); got != "w2" {
+		t.Errorf("binding workspace = %q, want w2", got)
+	}
+	if strings.Contains(diag, "herdr: worktree placement for") {
+		t.Errorf("placement succeeded but wrote a fallback diagnostic; stderr:\n%s", diag)
+	}
+}
+
+// TestWorktreePlacementReusesRepoWorkspace pins gcs-hxuq: when herdr reports
+// the city workspace rooted in another repository, the worktree opens straight
+// from the workspace herdr already has at the worktree's repository root,
+// whatever its label, and no workspace is created.
+func TestWorktreePlacementReusesRepoWorkspace(t *testing.T) {
+	repo, wt := linkedWorktreeLayout(t)
+	other := t.TempDir()
+	f := newFakeWorktreeHerdr(t)
+	f.set(t, "workspaces.json", workspacesReply(t,
+		[3]string{"wC", "city", other},
+		[3]string{"wR", "infra", repo},
+	))
+	f.listWorktrees(t, repo, worktreeEntry{Path: wt, IsLinkedWorktree: true})
+	p := newWorktreeProvider(t, f)
+
+	if err := p.start(context.Background(), citySessionName, worktreeStartConfig(wt)); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	calls := f.calls(t)
+	log := strings.Join(calls, "\n")
+	if callIndex(calls, "worktree open --workspace wC") >= 0 {
+		t.Errorf("opened from a workspace of another repository; log:\n%s", log)
+	}
+	if callIndex(calls, "worktree open --workspace wR --path "+wt+" --label chat --no-focus") < 0 {
+		t.Errorf("no worktree open from the repository workspace; log:\n%s", log)
+	}
+	if callIndex(calls, "workspace create") >= 0 {
+		t.Errorf("created a workspace although one is open at the repository root; log:\n%s", log)
+	}
+	if callIndex(calls, "tab create --workspace w2 --label chat") < 0 {
+		t.Errorf("no agent tab in the worktree workspace; log:\n%s", log)
+	}
+}
+
+// TestWorktreePlacementRigWorkspaceInRepoStaysSource pins that a rig workspace
+// herdr reports rooted in the worktree's repository stays the source: no
+// repository workspace lookup changes today's rig placement.
+func TestWorktreePlacementRigWorkspaceInRepoStaysSource(t *testing.T) {
+	repo, wt := linkedWorktreeLayout(t)
+	f := newFakeWorktreeHerdr(t)
+	f.set(t, "workspaces.json", workspacesReply(t,
+		[3]string{"wX", "elsewhere", t.TempDir()},
+		[3]string{"w1", "myrig", repo},
+	))
+	f.listWorktrees(t, repo, worktreeEntry{Path: wt, IsLinkedWorktree: true})
+	p := newWorktreeProvider(t, f)
+
+	if err := p.start(context.Background(), worktreeSessionName, worktreeStartConfig(wt)); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	calls := f.calls(t)
+	log := strings.Join(calls, "\n")
+	if n := callCount(calls, "worktree open"); n != 1 || callIndex(calls, "worktree open --workspace w1 ") < 0 {
+		t.Errorf("want one worktree open from the rig workspace; log:\n%s", log)
+	}
+	if callIndex(calls, "workspace create") >= 0 {
+		t.Errorf("created a workspace; log:\n%s", log)
 	}
 }
