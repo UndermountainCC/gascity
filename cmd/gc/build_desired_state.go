@@ -258,6 +258,53 @@ var (
 // contending pools so stable template sort order does not always win.
 var poolSessionCreateFairShareCounter atomic.Uint64
 
+// poolSessionCreateDeferrals remembers which pools the create budget keeps
+// refusing. Every build advances poolSessionCreateFairShareCounter, including
+// builds that realize nothing, so the rotation alone does not guarantee that a
+// refused pool ever wins. The deferral count moves the pool ahead instead.
+var poolSessionCreateDeferrals = newPoolCreateDeferrals()
+
+// poolCreateDeferrals counts, per city and pool template, the consecutive
+// desired-state builds whose create budget refused the template a fresh
+// create. Legacy realization settles it once per pool and build
+// (recordPoolSessionCreateOutcome); the v2 allocator keeps its own fair seed.
+// A build that does not realize the pool (a filtered or preview build) leaves
+// its count unchanged. The counts live in memory only: a restarted controller
+// starts every pool even.
+type poolCreateDeferrals struct {
+	mu     sync.Mutex
+	byCity map[string]map[string]int
+}
+
+func newPoolCreateDeferrals() *poolCreateDeferrals {
+	return &poolCreateDeferrals{byCity: make(map[string]map[string]int)}
+}
+
+// deferred returns how many consecutive builds refused template a create.
+func (d *poolCreateDeferrals) deferred(city, template string) int {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.byCity[city][template]
+}
+
+// settle records one build's realization of template: a refused build
+// extends the streak; any other outcome (a create planned, every request
+// reused or gated) ends it.
+func (d *poolCreateDeferrals) settle(city, template string, refused bool) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if !refused {
+		delete(d.byCity[city], template)
+		return
+	}
+	templates := d.byCity[city]
+	if templates == nil {
+		templates = make(map[string]int)
+		d.byCity[city] = templates
+	}
+	templates[template]++
+}
+
 func (bp *agentBuildParams) configurePoolSessionCreateFairShare(states []PoolDesiredState) {
 	if bp == nil || bp.poolSessionCreateBudget == nil {
 		return
@@ -267,14 +314,17 @@ func (bp *agentBuildParams) configurePoolSessionCreateFairShare(states []PoolDes
 		demand := poolplan.Demand{Template: state.Template}
 		for _, request := range state.Requests {
 			// Requests with a session bead ID represent in-flight capacity and
-			// must not reserve fresh-create budget for this template.
-			if request.Tier != "new" || request.SessionBeadID != "" {
+			// must not reserve fresh-create budget for this template. A
+			// wake-known-identity request carries none: it plans a clean
+			// create just as a "new" request does.
+			if (request.Tier != "new" && request.Tier != "wake-known-identity") || request.SessionBeadID != "" {
 				continue
 			}
 			demand.FreshCreates++
 			demand.HasFloor = demand.HasFloor || request.FloorGuarantee
 		}
 		if demand.FreshCreates > 0 {
+			demand.Deferred = poolSessionCreateDeferrals.deferred(bp.cityPath, state.Template)
 			demands = append(demands, demand)
 		}
 	}
@@ -287,6 +337,17 @@ func (bp *agentBuildParams) tryClaimPoolSessionCreate(template string) bool {
 		return true
 	}
 	return bp.poolSessionCreateBudget.TryClaim(template)
+}
+
+// recordPoolSessionCreateOutcome feeds poolSessionCreateDeferrals once per
+// pool from legacy realization: refused reports that the budget refused one
+// of the pool's requests and none got a fresh create. Read-only and plan-only
+// builds record nothing, so a preview cannot move a pool's place in line.
+func (bp *agentBuildParams) recordPoolSessionCreateOutcome(template string, refused bool) {
+	if bp == nil || bp.poolSessionCreateBudget == nil || bp.readOnly || bp.planOnly {
+		return
+	}
+	poolSessionCreateDeferrals.settle(bp.cityPath, template, refused)
 }
 
 func (bp *agentBuildParams) releasePoolSessionCreate() {
@@ -4220,6 +4281,7 @@ func realizePoolDesiredSessionsAt(
 	// reserve an (alias, slot) for a fresh create. Mutates used/usedSlots
 	// under serial control so dedup and slot allocation remain deterministic.
 	items := make([]poolRealizeWorkItem, 0, len(poolState.Requests))
+	createPlanned, createRefused := false, false
 	for _, request := range poolState.Requests {
 		// planItem runs the per-request selection and returns the work item;
 		// any early-out (skip path) sets item.skip and returns. The single
@@ -4247,6 +4309,8 @@ func realizePoolDesiredSessionsAt(
 				item.request = unnamed
 				sessionInfo, slot, plan, err = seatsElsewhere.selectOrPlan(prefer, unnamed, poolDecisionTime, used, usedSlots)
 			}
+			createPlanned = createPlanned || (err == nil && plan != nil)
+			createRefused = createRefused || errors.Is(err, errPoolSessionCreateBudgetExhausted)
 			if err != nil {
 				switch {
 				case errors.Is(err, errPoolSeatRunsElsewhere):
@@ -4287,6 +4351,7 @@ func realizePoolDesiredSessionsAt(
 		}
 		items = append(items, planItem())
 	}
+	bp.recordPoolSessionCreateOutcome(poolState.Template, createRefused && !createPlanned)
 	stats.plan = bp.realizeNow().Sub(segmentStart)
 
 	// Phase B (parallel, bounded): materialize planned creates. Per-identity
