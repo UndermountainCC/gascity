@@ -26,7 +26,7 @@ import (
 	sessionauto "github.com/gastownhall/gascity/internal/runtime/auto"
 	"github.com/gastownhall/gascity/internal/runtime/guard"
 	sessionhybrid "github.com/gastownhall/gascity/internal/runtime/hybrid"
-	sessionk8s "github.com/gastownhall/gascity/internal/runtime/k8s"
+	"github.com/gastownhall/gascity/internal/runtime/registry"
 	sessiontmux "github.com/gastownhall/gascity/internal/runtime/tmux"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/supervisor"
@@ -1394,16 +1394,24 @@ func openCityEventsProviderWithConfig(providerConfig func() config.EventsConfig,
 }
 
 // newHybridProvider constructs a composite provider that routes sessions to
-// tmux (local) or k8s (remote) based on session name. The GC_HYBRID_REMOTE_MATCH
-// env var controls which sessions go to k8s. If unset, all sessions route to
-// local tmux.
-func newHybridProvider(sc config.SessionConfig, cityName, cityPath string) (runtime.Provider, error) {
-	// Cut-over: hybrid routes to the seam-backed tmux/k8s providers, so
-	// hybrid-routed sessions flow through the seams like every other path.
-	local := sessiontmux.NewSeamBackedWithConfig(tmuxConfigFromSession(sc, cityName, cityPath))
-	remote, err := sessionk8s.NewSeamBacked(sessionk8s.WithCityName(cityName))
+// one of two legs based on session name. The legs are the runtimes named by
+// [session.hybrid] local and remote (default tmux and k8s), validated and
+// built through reg with the hybrid's own session config, city name and
+// city path. A session goes to the remote leg when its name contains the
+// GC_HYBRID_REMOTE_MATCH pattern, or [session] remote_match when that env
+// var is unset or empty; every other session goes to the local leg.
+func newHybridProvider(reg *registry.Registry, sc config.SessionConfig, cityName, cityPath string) (runtime.Provider, error) {
+	if err := validateHybridLegs(reg, sc); err != nil {
+		return nil, fmt.Errorf("hybrid: %w", err)
+	}
+	remoteLeg, localLeg := hybridLegs(sc)
+	local, err := reg.New(localLeg.name, sc, cityName, cityPath)
 	if err != nil {
-		return nil, fmt.Errorf("hybrid: k8s backend: %w", err)
+		return nil, fmt.Errorf("hybrid: local leg %q: %w", localLeg.name, err)
+	}
+	remote, err := reg.New(remoteLeg.name, sc, cityName, cityPath)
+	if err != nil {
+		return nil, fmt.Errorf("hybrid: remote leg %q: %w", remoteLeg.name, err)
 	}
 	pattern := sc.RemoteMatch
 	if v := os.Getenv("GC_HYBRID_REMOTE_MATCH"); v != "" {

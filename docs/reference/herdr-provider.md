@@ -121,6 +121,46 @@ gc start <city>
 `GC_SESSION` overrides the effective provider name for that process, the same
 way it selects `exec:<script>` or any other backend.
 
+## Using herdr as the hybrid local leg
+
+The `hybrid` session provider runs some sessions locally and sends the rest to
+a remote backend, chosen by session name. Its two legs are tmux (local) and
+k8s (remote) by default. To run the local sessions on herdr while matching
+sessions still start in k8s pods, name the legs in `[session.hybrid]`:
+
+```toml
+[session]
+provider = "hybrid"
+remote_match = "pod-"   # sessions whose name contains "pod-" go to the remote leg
+
+[session.hybrid]
+local = "herdr"         # every other session runs on herdr
+remote = "k8s"          # the default; may be omitted
+```
+
+| Setting | Effect |
+| --- | --- |
+| `remote_match` | A session whose name contains this substring goes to the remote leg. |
+| `GC_HYBRID_REMOTE_MATCH` | Overrides `remote_match` when set to a non-empty value. |
+| `local` | Runtime for every other session. Empty means `tmux`. |
+| `remote` | Runtime for matching sessions. Empty means `k8s`. |
+
+Each leg takes a builtin runtime name (`tmux`, `herdr`, `k8s`, `subprocess`,
+and so on) or an `exec:` or `ssh:` selection. Startup fails with an error
+naming the key and value for `hybrid` itself, a name that is not a builtin
+runtime (including pack-declared `[runtimes.<name>]` runtimes), a value with
+surrounding whitespace, or two legs that name the same runtime. An unknown name
+never falls back to tmux.
+
+With a herdr local leg, `gc init` checks that herdr is installed and asks for
+tmux only if the other leg needs it. A change to `[session.hybrid]` takes
+effect after the city restarts. The `hybrid` provider stays
+unavailable under the v2 session reconciler whichever legs it runs. Showing
+remote sessions inside herdr is not covered here.
+
+The generated reference lists both keys under
+[`HybridSessionConfig`](/reference/config#hybridsessionconfig).
+
 ## Piloting safely
 
 herdr is opt-in, and the backend is a whole-city choice, so you pilot it by

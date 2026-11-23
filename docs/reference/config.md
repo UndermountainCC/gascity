@@ -525,6 +525,15 @@ GitHubPRMonitorPatch modifies an existing GitHub PR readiness monitor by name.
 | `poll_interval` | string |  |  | PollInterval overrides the optional polling cadence. |
 | `merge_queue` | string |  |  | MergeQueuePolicy overrides merge-queue signal handling. Enum: `ignore`, `observe`, `repair` |
 
+## HybridSessionConfig
+
+HybridSessionConfig selects the two backends of the hybrid session provider.
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `local` | string |  |  | Local names the session runtime for sessions that do not match the remote pattern: a builtin runtime name such as "tmux" or "herdr", or an "exec:"/"ssh:" selection. Empty means "tmux". It may not be "hybrid" or a pack-declared [runtimes.&lt;name&gt;] runtime, and it must differ from the remote leg. "local" and "remote" name the routing branches only. |
+| `remote` | string |  |  | Remote names the session runtime for sessions whose name contains the remote pattern (remote_match / GC_HYBRID_REMOTE_MATCH). Empty means "k8s". Same rules as local. |
+
 ## Import
 
 Import defines a named import of another pack.
@@ -890,9 +899,10 @@ SessionConfig holds session provider settings.
 
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
-| `provider` | string |  |  | Provider selects the session backend: "fake", "fail", "subprocess", "acp", "exec:&lt;script&gt;", "k8s", or "" (default: tmux). |
+| `provider` | string |  |  | Provider selects the session backend: "fake", "fail", "subprocess", "acp", "exec:&lt;script&gt;", "k8s", "herdr", "hybrid", or "" (default: tmux). |
 | `k8s` | K8sConfig |  |  | K8s holds Kubernetes-specific settings for the native K8s provider. |
 | `acp` | ACPSessionConfig |  |  | ACP holds settings for the ACP (Agent Client Protocol) session provider. |
+| `hybrid` | HybridSessionConfig |  |  | Hybrid selects the local and remote legs of the hybrid session provider. |
 | `setup_timeout` | string |  | `10s` | SetupTimeout is the per-command/script timeout for session setup and pre_start commands. Duration string (e.g., "10s", "30s"). Defaults to "10s". |
 | `setup_max_timeout` | string |  |  | SetupMaxTimeout enables an activity-aware budget for session setup and pre_start commands. When set (e.g. "10m"), a setup command is no longer killed after setup_timeout of wall clock; instead setup_timeout bounds how long it may run without producing output (idle budget) and setup_max_timeout bounds its total runtime regardless of output (the runaway ceiling). A slow but healthy command — a large worktree checkout streaming progress — survives, while a hung one still dies after setup_timeout of silence. Duration string. Empty (the default) keeps the fixed setup_timeout deadline. |
 | `nudge_ready_timeout` | string |  | `10s` | NudgeReadyTimeout is how long to wait for the agent to be ready before sending nudge text. Duration string. Defaults to "10s". |
@@ -905,7 +915,7 @@ SessionConfig holds session provider settings.
 | `progress_stall_timeout` | string |  |  | ProgressStallTimeout, when set, enables progress-aware session recycling: a desired, alive, claim-less session on a healthy provider whose last provider-reported activity is older than this duration is restarted fresh. Such a session has likely parked (e.g. its turn ended on a provider auth error) and will not self-recover. Set this above the longest legitimate alive-idle period for the city; values below 5m are clamped to 5m. Duration string (e.g. "30m"). Unset/zero disables it. Legacy only: deprecated and ignored under the v2 reconciler, whose work ladder replaces it. |
 | `claim_holder_stall_timeout` | string |  |  | ClaimHolderStallTimeout, when set, enables progress-aware recycling of a desired, alive session that holds in-progress work but has stopped making progress. Because recycling a claim-holder interrupts work, set this above the longest legitimate quiet period. Values below 5m are clamped to 5m. Duration string (e.g. "20m"). Unset/zero disables it. Legacy only: deprecated and ignored under the v2 reconciler, whose work ladder replaces it. |
 | `socket` | string |  |  | Socket specifies the tmux socket name for per-city isolation. When set, tmux commands connect to a dedicated server: "tmux -L &lt;socket&gt;" normally, or "tmux -S &lt;path&gt;" with the path pinned from $TMUX when gc runs in a pane of that same server, so a pane whose TMUX_TMPDIR differs from the controller's still reaches the server hosting it. When empty, defaults to the city name (workspace.name) — giving every city its own tmux server automatically. Set explicitly to override. |
-| `remote_match` | string |  |  | RemoteMatch is a substring pattern for the hybrid provider to route sessions to the remote (K8s) backend. Sessions whose names contain this pattern go to K8s; all others stay local (tmux). Overridden by the GC_HYBRID_REMOTE_MATCH env var if set. |
+| `remote_match` | string |  |  | RemoteMatch is a substring pattern for the hybrid provider to route sessions to its remote leg ([session.hybrid] remote, default k8s). Sessions whose names contain this pattern go to the remote leg; all others go to the local leg ([session.hybrid] local, default tmux). Overridden by the GC_HYBRID_REMOTE_MATCH env var if set. |
 | `program_status` | string |  | `off` | ProgramStatus is the city switch for OSC 7501 program status. "off" (the default) changes nothing. "shadow" arms capture on declared providers ([providers.&lt;p&gt;.program_status]) and compares readings without changing any decision. "on" lets valid readings decide. Enum: `off`, `shadow`, `on` |
 
 ## SessionSleepConfig

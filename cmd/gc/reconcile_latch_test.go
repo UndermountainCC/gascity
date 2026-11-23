@@ -89,6 +89,45 @@ func TestV2LatchRefusesEachDeferredFeature(t *testing.T) {
 	}
 }
 
+// TestV2LatchHybridRefusalFollowsLegs pins that the v2 refusal of a hybrid
+// city follows its effective legs, remote first: the first leg v2 would
+// itself refuse supplies the parity PR, and a hybrid whose legs are both
+// admitted is still refused as the hybrid session runtime.
+func TestV2LatchHybridRefusalFollowsLegs(t *testing.T) {
+	cases := []struct {
+		name          string
+		local, remote string
+		config        string
+		pr            string
+	}{
+		{name: "default legs", config: `[session] provider = "hybrid"`, pr: "PAR-K8S"},
+		{name: "herdr local, defaulted k8s remote", local: "herdr", config: `[session] provider = "hybrid"`, pr: "PAR-K8S"},
+		{name: "herdr local, configured k8s remote", local: "herdr", remote: "k8s", config: `[session] provider = "hybrid" with [session.hybrid] remote = "k8s"`, pr: "PAR-K8S"},
+		{name: "herdr local, subprocess remote", local: "herdr", remote: "subprocess", config: `[session] provider = "hybrid" with [session.hybrid] local = "herdr"`, pr: "PAR-HERDR"},
+		{name: "both legs admitted", local: "tmux", remote: "subprocess", config: `[session] provider = "hybrid"`},
+		{name: "hybrid local leg is skipped", local: "hybrid", config: `[session] provider = "hybrid"`, pr: "PAR-K8S"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := v2City(func(c *config.City) {
+				c.Session.Provider = "hybrid"
+				c.Session.Hybrid = config.HybridSessionConfig{Local: tc.local, Remote: tc.remote}
+			})
+			got := v2LatchRefusals(cfg, "", nil)
+			if len(got) != 1 {
+				t.Fatalf("v2LatchRefusals = %+v, want exactly one refusal", got)
+			}
+			if got[0].Feature != "the hybrid session runtime" || got[0].Config != tc.config || got[0].ParityPR != tc.pr {
+				t.Fatalf("refusal = %+v, want Feature %q, Config %q, ParityPR %q", got[0], "the hybrid session runtime", tc.config, tc.pr)
+			}
+			mode, err := latchReconcilerMode(cfg, "", noEnv)
+			if err == nil || mode != reconcilerLegacy || !strings.Contains(err.Error(), got[0].String()) {
+				t.Fatalf("latch = %v, %v; want legacy and an error naming %q", mode, err, got[0])
+			}
+		})
+	}
+}
+
 // TestV2LatchAdmitsInScopeFeatures pins the features v2 supports, the ones the
 // six cities configure (IMPLEMENTATION-PLAN §6.0) among them, so the latch
 // never blocks the cutover: agent idle_timeout, sleep_after_idle,

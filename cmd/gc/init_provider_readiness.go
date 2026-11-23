@@ -846,7 +846,10 @@ func citySessionRuntimeNames(cityPath string) map[string]bool {
 }
 
 // sessionRuntimeNamesFromConfig is citySessionRuntimeNames over an already
-// loaded config; ok reports whether cfg was readable.
+// loaded config; ok reports whether cfg was readable. When "hybrid" is
+// selected, the effective names of both its legs ([session.hybrid] local and
+// remote, default tmux and k8s) are added too, so a leg's backend is required
+// the same way a direct selection of it would be.
 func sessionRuntimeNamesFromConfig(cfg *config.City, ok bool) map[string]bool {
 	names := map[string]bool{}
 	add := func(raw string) {
@@ -872,6 +875,11 @@ func sessionRuntimeNamesFromConfig(cfg *config.City, ok bool) map[string]bool {
 			add(override)
 		}
 	}
+	if names["hybrid"] {
+		remote, local := hybridLegs(cfg.Session)
+		add(remote.name)
+		add(local.name)
+	}
 	return names
 }
 
@@ -881,9 +889,10 @@ func sessionRuntimeNamesFromConfig(cfg *config.City, ok bool) map[string]bool {
 // Naming a provider is not the same as resolving one, so a literal "tmux" is
 // not the only selection that needs tmux installed:
 //
-//   - "hybrid" composes a local tmux provider and routes every session to it
-//     unless a remote match pattern is configured, and even then only the
-//     matching sessions go remote.
+//   - "hybrid" needs tmux when either of its effective legs ([session.hybrid]
+//     local and remote, default local tmux) does: a leg named "tmux", or a
+//     leg the builtin registry does not resolve. Legs are resolved against
+//     the builtin registry, as hybrid construction resolves them.
 //   - A name the registry does not resolve is not rejected. It falls through
 //     to the tmux fallback, so such a city still runs on tmux.
 //
@@ -903,10 +912,32 @@ func selectionResolvesToTmux(names map[string]bool, cfg *config.City) bool {
 		reg = buildRuntimeRegistry()
 	}
 	for name := range names {
-		if name == "tmux" || name == "hybrid" {
+		if name == "tmux" {
+			return true
+		}
+		if name == "hybrid" && hybridLegsResolveToTmux(cfg) {
 			return true
 		}
 		if !reg.Resolves(name) {
+			return true
+		}
+	}
+	return false
+}
+
+// hybridLegsResolveToTmux reports whether either effective hybrid leg of cfg
+// runs on tmux: it names "tmux" or the builtin registry does not resolve it.
+// A nil cfg has the default legs.
+func hybridLegsResolveToTmux(cfg *config.City) bool {
+	var sc config.SessionConfig
+	if cfg != nil {
+		sc = cfg.Session
+	}
+	reg := buildRuntimeRegistry()
+	remote, local := hybridLegs(sc)
+	for _, leg := range []hybridLeg{remote, local} {
+		name := strings.TrimSpace(leg.name)
+		if name == "tmux" || !reg.Resolves(name) {
 			return true
 		}
 	}

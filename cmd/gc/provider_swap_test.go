@@ -54,6 +54,7 @@ func TestCarriedSessionLegs(t *testing.T) {
 		{name: "unrelated pack runtime change", old: composed, oldName: "tmux", newName: "tmux", newCfg: city(func(c *config.City) { c.Runtimes["box"] = config.DiscoveredRuntime{Command: "box-b"} }), want: composed},
 		{name: "socket change", old: composed, oldName: "tmux", newName: "tmux", newCfg: city(func(c *config.City) { c.Session.Socket = "t" }), want: sessionLegs{acp: acp}},
 		{name: "remote match change", old: composed, oldName: "hybrid", newName: "hybrid", newCfg: city(func(c *config.City) { c.Session.RemoteMatch = "k8s" }), want: sessionLegs{acp: acp}},
+		{name: "hybrid leg change", old: composed, oldName: "hybrid", newName: "hybrid", newCfg: city(func(c *config.City) { c.Session.Hybrid.Local = "herdr" }), want: sessionLegs{acp: acp}},
 		{name: "non-endpoint session setting", old: composed, oldName: "tmux", newName: "tmux", newCfg: city(func(c *config.City) { c.Session.SetupTimeout = "30s" }), want: composed},
 		{name: "ACP config change", old: composed, oldName: "tmux", newName: "tmux", newCfg: city(func(c *config.City) { c.Session.ACP.StopGrace = "9s" }), want: sessionLegs{base: base}},
 	} {
