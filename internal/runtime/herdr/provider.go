@@ -219,7 +219,9 @@ const envPaneGroup = "GC_HERDR_PANE_GROUP"
 // into. A session whose env sets GC_HERDR_PANE_GROUP is split into that tab of
 // the rig workspace (client.ensureGroupPlacement), whatever its work dir. A
 // work dir inside a linked git worktree goes to that worktree's herdr
-// workspace (client.ensureWorktreePlacement); every other session, and a
+// workspace (client.ensureWorktreePlacement), opened from the rig workspace or,
+// when that is outside the worktree's repository, from a workspace at the
+// repository root; every other session, and a
 // session herdr cannot place either way, gets a tab in the rig workspace
 // (client.ensurePlacement). The fallback writes one diagnostic unless herdr
 // merely reports the work dir is not in a linked worktree. The caller holds
