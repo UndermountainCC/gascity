@@ -241,8 +241,8 @@ func Catalog() []Entry {
 			waivedRuntime(
 				repoSymbol("cmd/gc", "newHybridProvider"),
 				time.Date(2026, time.December, 26, 0, 0, 0, 0, time.UTC),
-				"cmd/gc.newHybridProvider is the selected registry construction boundary. It builds the K8s backend before it consults its routing predicate, so the shared runtime contract cannot run against the wrapper without a Kubernetes client configuration."+
-					" Its tmux and K8s constructors are not claimed here; internal/runtime/hybrid.New is proved separately by runtime.composition.hybrid, and the wrapper's own conditional construction stays ungated."+
+				"cmd/gc.newHybridProvider is the selected registry construction boundary. With its default legs it builds the K8s backend before it consults its routing predicate, so the shared runtime contract cannot run against the wrapper without a Kubernetes client configuration."+
+					" Its leg constructors, resolved through the builtin runtime registry by [session.hybrid] (default tmux and K8s), are not claimed here; internal/runtime/hybrid.New is proved separately by runtime.composition.hybrid, and the wrapper's own conditional construction stays ungated."+
 					" Renewed by owner decision 2026-10-05 to unblock gc 1.5.1 validation, and again on 2026-11-07; the underlying test gap must be fixed separately.",
 			),
 		),

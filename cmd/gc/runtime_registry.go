@@ -103,7 +103,12 @@ func buildRuntimeRegistry() *registry.Registry {
 		return sessionherdr.New(session, providerStateDir("herdr", cityPath), cityPath, sc.SetupTimeoutDuration(), sc.SetupMaxTimeoutDuration()), nil
 	}, hostFilesystemAndPreStart))
 	must(r.Register("hybrid", func(_ string, sc config.SessionConfig, cityName, cityPath string) (runtime.Provider, error) {
-		return newHybridProvider(sc, cityName, cityPath)
+		// The legs resolve against a fresh builtin registry, so only builtin
+		// names are legs, even on a per-city Clone that adds pack-declared
+		// runtimes. The local registry r is not captured: the providerledger
+		// catalog guard forbids any use of it beyond direct registration.
+		// The package runtimeRegistry is not used: that is an init cycle.
+		return newHybridProvider(buildRuntimeRegistry(), sc, cityName, cityPath)
 	}))
 	must(r.RegisterPrefix("exec:", func(name string, sc config.SessionConfig, cityName, cityPath string) (runtime.Provider, error) {
 		script := strings.TrimPrefix(name, "exec:")
