@@ -1,9 +1,11 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"io"
 	"strconv"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"testing/synctest"
@@ -881,8 +883,9 @@ func TestExecutionStalledStopReleasesItsClaimAndCloses(t *testing.T) {
 		{name: "ladder on: kept whatever the records say (the recycle gives back nothing)", reason: executionStalledDrainReason, ladder: true},
 	} {
 		t.Run(c.name, func(t *testing.T) {
-			var claimID, otherID string
+			var claimID, otherID, seatName string
 			var work beads.Store
+			var relErr bytes.Buffer
 			s, got, leaf := stopRun(t, signaled(c.reason), undesired(c.reason), func(p *effectPass, _ *fenceLeaf, store beads.Store, id string) {
 				work = store
 				if !c.ladder {
@@ -897,6 +900,15 @@ func TestExecutionStalledStopReleasesItsClaimAndCloses(t *testing.T) {
 					t.Fatal(err)
 				}
 				claimID = claim.ID
+				seat, err := store.Get(id)
+				if err != nil {
+					t.Fatal(err)
+				}
+				seatName = seat.Metadata["session_name"]
+				// The hook's stamps name the stopped seat; a release clears them.
+				if err := store.SetMetadataBatch(claim.ID, map[string]string{beadmeta.SessionIDMetadataKey: id, beadmeta.SessionNameMetadataKey: seatName}); err != nil {
+					t.Fatal(err)
+				}
 				if c.other {
 					other, err := store.Create(beads.Bead{Title: "other step", Type: "task"})
 					if err != nil {
@@ -948,7 +960,7 @@ func TestExecutionStalledStopReleasesItsClaimAndCloses(t *testing.T) {
 				case "unreadable":
 					casSetMeta(t, store, id, session.WorkStartedKey, "{")
 				}
-				rel := newCloseReleases(p.World, nil, io.Discard)
+				rel := newCloseReleases(p.World, nil, &relErr)
 				rel.legs = testWorkLegs(p.World.CityPath, p.World.Env.Cfg, store, nil) // the pass's raw work legs, over the row's store
 				p.held.release = rel
 			})
@@ -971,6 +983,19 @@ func TestExecutionStalledStopReleasesItsClaimAndCloses(t *testing.T) {
 				t.Fatalf("claim %s %q assignee %q, row %s %v; want the claim given back and the seat closed", claimID, claim.Status, claim.Assignee, got.Status, got.Metadata)
 			case !c.release && (claim.Status != "in_progress" || got.Status == "closed"):
 				t.Fatalf("claim %s %q, row %s; want the work kept and the seat open", claimID, claim.Status, got.Status)
+			}
+			if seatName == "" {
+				t.Fatal("the seat has no session_name to stamp")
+			}
+			stampID, stampName := claim.Metadata[beadmeta.SessionIDMetadataKey], claim.Metadata[beadmeta.SessionNameMetadataKey]
+			if c.release && (stampID != "" || stampName != "") {
+				t.Fatalf("released claim still names the stopped seat: gc.session_id %q gc.session_name %q; stderr %q", stampID, stampName, relErr.String())
+			}
+			if !c.release && (stampID == "" || stampName == "") {
+				t.Fatalf("kept claim lost its session stamps: gc.session_id %q gc.session_name %q", stampID, stampName)
+			}
+			if strings.Contains(relErr.String(), "session identity") || strings.Contains(relErr.String(), "re-reading released claim") {
+				t.Fatalf("clearing the released claim's stamps failed: %s", relErr.String())
 			}
 		})
 	}

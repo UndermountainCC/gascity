@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"maps"
 	"os"
@@ -340,8 +341,9 @@ func beginSessionDrainInfo(
 // take, which is the failure this whole lane exists to end.
 //
 // Convergence chain once it fires: tracked drain -> deferred interrupt -> stop ->
-// session bead closed -> the claim released by the dead-assignee reopen lane ->
-// the row is demand again -> a fresh seat claims it.
+// the stalled claim given back (releaseExecutionStalledDrainClaim; the v2 stop's
+// releaseStalledClaim) -> the seat's gated close finds no work and closes, freeing
+// its slot and name -> the row is demand again -> a fresh seat claims it.
 const executionStalledDrainReason = "execution-stalled"
 
 func drainReasonCancelable(reason string) bool {
@@ -808,7 +810,7 @@ func advanceSessionDrainsWithSessionsTraced(
 	cfg *config.City,
 	clk clock.Clock,
 	trace *sessionReconcilerTraceCycle,
-) {
+) (stalledStops []sessions.Info) {
 	// wakeEvals is required. The reconciler builds it from the coherent infoByID
 	// snapshot via ComputeAwakeSet -> awakeSetToWakeEvals; tests supply explicit
 	// wakeEvals encoding the premise they exercise. Step 5d dropped the raw-bead
@@ -879,6 +881,9 @@ func advanceSessionDrainsWithSessionsTraced(
 		if !running {
 			// Process exited — drain complete.
 			completeDrain(info, sessFront, ds, clk)
+			if ds.reason == executionStalledDrainReason {
+				stalledStops = append(stalledStops, info)
+			}
 			dt.clearIdleProbe(id)
 			dt.remove(id)
 			telemetry.RecordDrainTransition(context.Background(), name, ds.reason, "complete")
@@ -1039,6 +1044,9 @@ func advanceSessionDrainsWithSessionsTraced(
 			}
 			if !running {
 				completeDrain(info, sessFront, ds, clk)
+				if ds.reason == executionStalledDrainReason {
+					stalledStops = append(stalledStops, info)
+				}
 				dt.clearIdleProbe(id)
 				dt.remove(id)
 				telemetry.RecordDrainTransition(context.Background(), name, ds.reason, "timeout")
@@ -1050,6 +1058,46 @@ func advanceSessionDrainsWithSessionsTraced(
 		}
 		// Else: still draining, check again next tick.
 	}
+	return stalledStops
+}
+
+// releaseExecutionStalledDrainClaim gives back, once the reconciler's drain
+// scan has seen an execution-stalled drain's runtime exit, the claim the
+// execution backstop drained the seat for: the legacy reconciler's form of
+// the v2 stop's releaseStalledClaim. Without it the drained seat sleeps
+// assigned the claim, so its gated close refuses (has-work), the
+// dead-assignee reopen lane skips a claim whose seat bead is open, and a
+// singleton pool cannot mint the replacement while the asleep row keeps the
+// canonical name. It gives back what v2's does (stalledMarkerReleases): only
+// a marker the backstop wrote for the row's current incarnation counts, and
+// a claim the seat records a turn began is kept. Best effort: a claim it
+// cannot release stays assigned.
+func releaseExecutionStalledDrainClaim(sessStore beads.SessionStore, sw *SeatWork, cfg *config.City, info sessions.Info, stderr io.Writer) {
+	if sw == nil || strings.TrimSpace(info.ID) == "" {
+		return
+	}
+	if stderr == nil {
+		stderr = io.Discard
+	}
+	seat, err := liveBeadRead(sessStore, info.ID)
+	if err != nil {
+		fmt.Fprintf(stderr, "execution-stalled drain: reading %s before giving back its claim: %v\n", info.ID, err) //nolint:errcheck // best-effort
+		return
+	}
+	if seat.Status == "closed" || !stalledMarkerReleases(seat.Metadata) {
+		return
+	}
+	releaseStalledClaim(&closeReleases{legs: sw.Legs(), cfg: cfg, stderr: stderr}, stalledClaimOf(info, seat.Metadata))
+}
+
+// closesAsExecutionStalled reports whether an undesired, stopped row closes
+// as execution-stalled rather than "orphaned": a pool seat whose agent is
+// still configured and that an execution-stalled drain stopped. "orphaned"
+// reads "configured agent removed", which names the wrong cause for it.
+func closesAsExecutionStalled(info sessions.Info, cfg *config.City) bool {
+	return strings.TrimSpace(info.SleepReason) == executionStalledDrainReason &&
+		isPoolManagedSessionInfo(info) && !isNamedSessionInfo(info) &&
+		findAgentByTemplate(cfg, normalizedSessionTemplateInfo(info, cfg)) != nil
 }
 
 // completeDrain writes drain-complete metadata to the store for the drained
