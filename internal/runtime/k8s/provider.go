@@ -81,9 +81,8 @@ type schedulingFields struct {
 // Uses rest.InClusterConfig() when running in a pod, falls back to
 // clientcmd.BuildConfigFromFlags() for local development.
 func NewProvider() (*Provider, error) {
-	namespace := envOrDefault("GC_K8S_NAMESPACE", "gc")
+	namespace, k8sContext := TargetFromEnv()
 	image := os.Getenv("GC_K8S_IMAGE")
-	k8sContext := os.Getenv("GC_K8S_CONTEXT")
 
 	restConfig, err := buildRESTConfig(k8sContext)
 	if err != nil {
@@ -277,7 +276,7 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 
 	if !p.prebaked {
 		// Signal entrypoint to proceed.
-		if _, err := p.ops.execInPod(ctx, podName, "agent",
+		if _, err := p.ops.execInPod(ctx, podName, AgentContainer,
 			[]string{"touch", "/workspace/.gc-workspace-ready"}, nil); err != nil {
 			fmt.Fprintf(p.stderr, "gc: warning: touch .gc-workspace-ready in %s: %v\n", podName, err) //nolint:errcheck
 		}
@@ -322,7 +321,7 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 		}
 	}
 	if requiresPostStartLiveness {
-		_, tmuxErr := p.ops.execInPod(ctx, podName, "agent",
+		_, tmuxErr := p.ops.execInPod(ctx, podName, AgentContainer,
 			[]string{"tmux", "has-session", "-t", tmuxSession}, nil)
 		if tmuxErr != nil {
 			cleanup("session died immediately after startup")
@@ -347,7 +346,7 @@ func (p *Provider) runPodPostLaunchSetup(ctx context.Context, podName string, cf
 	// Enable pane logging for diagnostics. No -o: the pipe survives
 	// respawn-pane -k, and -o would toggle it off on every other Relaunch;
 	// plain pipe-pane replaces any existing pipe, so this is idempotent.
-	_, _ = p.ops.execInPod(ctx, podName, "agent",
+	_, _ = p.ops.execInPod(ctx, podName, AgentContainer,
 		[]string{"tmux", "pipe-pane", "-t", tmuxSession, "cat >> /tmp/agent-output.log"}, nil)
 
 	// Run session_setup commands inside the pod.
@@ -355,7 +354,7 @@ func (p *Provider) runPodPostLaunchSetup(ctx context.Context, podName string, cf
 		if cmd == "" {
 			continue
 		}
-		_, _ = p.ops.execInPod(ctx, podName, "agent",
+		_, _ = p.ops.execInPod(ctx, podName, AgentContainer,
 			[]string{"sh", "-c", cmd}, nil)
 	}
 
@@ -365,7 +364,7 @@ func (p *Provider) runPodPostLaunchSetup(ctx context.Context, podName string, cf
 		if err != nil {
 			fmt.Fprintf(p.stderr, "gc: warning: reading session_setup_script %q for %s: %v\n", cfg.SessionSetupScript, podName, err) //nolint:errcheck
 		} else {
-			_, _ = p.ops.execInPod(ctx, podName, "agent",
+			_, _ = p.ops.execInPod(ctx, podName, AgentContainer,
 				[]string{"sh"}, strings.NewReader(string(script)))
 		}
 	}
@@ -403,7 +402,7 @@ func (p *Provider) Relaunch(ctx context.Context, name string, cfg runtime.Config
 	}
 	// The tmux server + "main" session must be alive to respawn into; a dead
 	// session means the box is not warm enough — reprovision, don't respawn.
-	if _, err := p.ops.execInPod(ctx, podName, "agent",
+	if _, err := p.ops.execInPod(ctx, podName, AgentContainer,
 		[]string{"tmux", "has-session", "-t", tmuxSession}, nil); err != nil {
 		return fmt.Errorf("%w: session %q (pod %s has no live tmux session)", runtime.ErrSessionNotFound, name, podName)
 	}
@@ -420,7 +419,7 @@ func (p *Provider) Relaunch(ctx context.Context, name string, cfg runtime.Config
 	}
 
 	// Respawn the agent in the warm "main" session.
-	if _, err := p.ops.execInPod(ctx, podName, "agent",
+	if _, err := p.ops.execInPod(ctx, podName, AgentContainer,
 		buildRespawnCommand(cfg), nil); err != nil {
 		return fmt.Errorf("k8s relaunch %q: respawn-pane: %w", name, err)
 	}
@@ -439,7 +438,7 @@ func (p *Provider) Relaunch(ctx context.Context, name string, cfg runtime.Config
 			case <-timer.C:
 			}
 		}
-		if _, err := p.ops.execInPod(ctx, podName, "agent",
+		if _, err := p.ops.execInPod(ctx, podName, AgentContainer,
 			[]string{"tmux", "has-session", "-t", tmuxSession}, nil); err != nil {
 			return fmt.Errorf("%w: session %q died immediately after relaunch: %w",
 				runtime.ErrSessionDiedDuringStartup, name, err)
@@ -504,7 +503,7 @@ func (p *Provider) IsRunning(name string) bool {
 		return false
 	}
 	// Pod Running + tmux session alive.
-	_, err = p.ops.execInPod(ctx, podName, "agent",
+	_, err = p.ops.execInPod(ctx, podName, AgentContainer,
 		[]string{"tmux", "has-session", "-t", tmuxSession}, nil)
 	return err == nil
 }
@@ -517,7 +516,7 @@ func (p *Provider) IsAttached(name string) bool {
 	if err != nil {
 		return false
 	}
-	output, err := p.ops.execInPod(ctx, podName, "agent",
+	output, err := p.ops.execInPod(ctx, podName, AgentContainer,
 		[]string{"tmux", "display-message", "-t", tmuxSession, "-p", "#{session_attached}"}, nil)
 	if err != nil {
 		return false
@@ -570,7 +569,7 @@ func (p *Provider) ProcessAlive(name string, processNames []string) bool {
 	}
 
 	for _, pname := range processNames {
-		_, err := p.ops.execInPod(ctx, pod.Name, "agent",
+		_, err := p.ops.execInPod(ctx, pod.Name, AgentContainer,
 			[]string{"pgrep", "-f", pname}, nil)
 		if err == nil {
 			return true
@@ -637,7 +636,7 @@ func (p *Provider) SetMeta(name, key, value string) error {
 	if err != nil {
 		return nil // best-effort
 	}
-	_, _ = p.ops.execInPod(ctx, podName, "agent",
+	_, _ = p.ops.execInPod(ctx, podName, AgentContainer,
 		[]string{"tmux", "set-environment", "-t", tmuxSession, key, value}, nil)
 	return nil
 }
@@ -649,7 +648,7 @@ func (p *Provider) GetMeta(name, key string) (string, error) {
 	if err != nil {
 		return "", nil
 	}
-	output, err := p.ops.execInPod(ctx, podName, "agent",
+	output, err := p.ops.execInPod(ctx, podName, AgentContainer,
 		[]string{"tmux", "show-environment", "-t", tmuxSession, key}, nil)
 	if err != nil {
 		return "", nil
@@ -672,7 +671,7 @@ func (p *Provider) RemoveMeta(name, key string) error {
 	if err != nil {
 		return nil // best-effort
 	}
-	_, _ = p.ops.execInPod(ctx, podName, "agent",
+	_, _ = p.ops.execInPod(ctx, podName, AgentContainer,
 		[]string{"tmux", "set-environment", "-t", tmuxSession, "-u", key}, nil)
 	return nil
 }
@@ -771,7 +770,7 @@ func (p *Provider) CopyTo(name, src, relDst string) error {
 	if relDst != "" {
 		dst = "/workspace/" + relDst
 	}
-	return copyToPod(ctx, p.ops, podName, "agent", src, dst)
+	return copyToPod(ctx, p.ops, podName, AgentContainer, src, dst)
 }
 
 // --- Internal helpers ---
@@ -808,7 +807,7 @@ func (p *Provider) probeTmuxLiveness(ctx context.Context, pod *corev1.Pod) (aliv
 	}
 	podName := pod.Name
 	for attempt := 0; attempt < livenessProbeAttempts; attempt++ {
-		_, err = p.ops.execInPod(ctx, podName, "agent",
+		_, err = p.ops.execInPod(ctx, podName, AgentContainer,
 			[]string{"tmux", "has-session", "-t", tmuxSession}, nil)
 		if err == nil {
 			return true, true, nil
@@ -835,7 +834,7 @@ func agentContainerRunning(pod *corev1.Pod) (running, known bool) {
 		return false, false
 	}
 	for _, cs := range pod.Status.ContainerStatuses {
-		if cs.Name == "agent" {
+		if cs.Name == AgentContainer {
 			return cs.State.Running != nil, true
 		}
 	}
@@ -861,7 +860,7 @@ func (p *Provider) Exec(ctx context.Context, name string, argv []string) ([]byte
 	if err != nil {
 		return nil, -1, fmt.Errorf("k8s exec %q: %w", name, err)
 	}
-	out, err := p.ops.execInPod(ctx, podName, "agent", argv, nil)
+	out, err := p.ops.execInPod(ctx, podName, AgentContainer, argv, nil)
 	if err != nil {
 		var exitErr execerr.ExitError
 		if errors.As(err, &exitErr) && exitErr.Exited() {
@@ -968,7 +967,7 @@ func waitForTmux(ctx context.Context, ops k8sOps, name string, timeout time.Dura
 			return ctx.Err()
 		default:
 		}
-		_, err := ops.execInPod(ctx, name, "agent",
+		_, err := ops.execInPod(ctx, name, AgentContainer,
 			[]string{"tmux", "has-session", "-t", tmuxSession}, nil)
 		if err == nil {
 			return nil
@@ -989,17 +988,17 @@ func initCityInPod(ctx context.Context, ops k8sOps, podName, ctrlCity, skipRel s
 	defer func() {
 		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 		defer cancel()
-		_, _ = ops.execInPod(cleanupCtx, podName, "agent", []string{"rm", "-rf", "/tmp/city-src"}, nil)
+		_, _ = ops.execInPod(cleanupCtx, podName, AgentContainer, []string{"rm", "-rf", "/tmp/city-src"}, nil)
 	}()
 
 	// Copy the city directory into the pod, including its current .gc state.
-	if err := copyDirToPodSkipping(ctx, ops, podName, "agent", ctrlCity, "/tmp/city-src", skipRel); err != nil {
+	if err := copyDirToPodSkipping(ctx, ops, podName, AgentContainer, ctrlCity, "/tmp/city-src", skipRel); err != nil {
 		return err
 	}
 	// Run gc init --from with GC_DOLT=skip so gc init does not attempt to
 	// start a local Dolt server. Pod sessions consume the projected GC_DOLT_*
 	// connection target through env; they do not rewrite canonical .beads files.
-	_, err := ops.execInPod(ctx, podName, "agent",
+	_, err := ops.execInPod(ctx, podName, AgentContainer,
 		[]string{"env", "GC_DOLT=skip", "gc", "init", "--from", "/tmp/city-src", "/workspace", "--no-start", "--skip-provider-readiness"}, nil)
 	if err != nil {
 		return err
@@ -1054,7 +1053,7 @@ func remoteStageRecord(cityName, ctrlCity string, now time.Time) string {
 // shell write (temp file, then rename), independent of the pod's gc version.
 func writeRemoteStageInPod(ctx context.Context, ops k8sOps, podName, cityName, ctrlCity string) error {
 	script := "mkdir -p " + podWorkspaceRoot + "/.gc && cat > " + remoteStageRecordPath + ".tmp && mv -f " + remoteStageRecordPath + ".tmp " + remoteStageRecordPath
-	_, err := ops.execInPod(ctx, podName, "agent", []string{"sh", "-c", script}, strings.NewReader(remoteStageRecord(cityName, ctrlCity, time.Now())))
+	_, err := ops.execInPod(ctx, podName, AgentContainer, []string{"sh", "-c", script}, strings.NewReader(remoteStageRecord(cityName, ctrlCity, time.Now())))
 	return err
 }
 
@@ -1111,7 +1110,7 @@ func initBeadsInPod(ctx context.Context, ops k8sOps, podName string, cfg runtime
 		base64.StdEncoding.EncodeToString([]byte(doltHost)),
 		base64.StdEncoding.EncodeToString([]byte(doltPort)),
 	)
-	_, err = ops.execInPod(ctx, podName, "agent", []string{"sh", "-c", patchCmd}, nil)
+	_, err = ops.execInPod(ctx, podName, AgentContainer, []string{"sh", "-c", patchCmd}, nil)
 	return err
 }
 
@@ -1128,7 +1127,7 @@ func verifyBeadsInPod(ctx context.Context, ops k8sOps, podName string, cfg runti
 	if len(projected) == 0 {
 		return nil
 	}
-	_, err = ops.execInPod(ctx, podName, "agent", []string{
+	_, err = ops.execInPod(ctx, podName, AgentContainer, []string{
 		"sh", "-c",
 		`cd "$1" && test -f .beads/metadata.json && test -f .beads/config.yaml`,
 		"sh", storeRoot,
@@ -1165,6 +1164,23 @@ func managedServiceAlias() (string, string, error) {
 	default:
 		return host, port, nil
 	}
+}
+
+// TargetFromEnv returns the namespace and kubectl context the k8s provider
+// targets: GC_K8S_NAMESPACE (default "gc") and GC_K8S_CONTEXT ("" means the
+// current context). Callers that address the provider's pods from outside it
+// use this so they never drift from the provider's own target.
+func TargetFromEnv() (namespace, kubeContext string) {
+	return targetFrom(os.Getenv)
+}
+
+// targetFrom is TargetFromEnv over an injectable environment lookup.
+func targetFrom(getenv func(string) string) (namespace, kubeContext string) {
+	namespace = getenv("GC_K8S_NAMESPACE")
+	if namespace == "" {
+		namespace = "gc"
+	}
+	return namespace, getenv("GC_K8S_CONTEXT")
 }
 
 func envOrDefault(key, def string) string {
