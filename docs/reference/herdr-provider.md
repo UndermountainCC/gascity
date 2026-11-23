@@ -344,8 +344,12 @@ workspace/tab structure mirrors the town:
   is a linked git worktree (for example one a `pre_start` script created with
   `git worktree add`), gc opens that checkout as a herdr worktree workspace,
   labeled with the session's tab label and grouped under its rig's
-  workspace, and the agent runs in a tab inside it. A pool whose sessions
-  each get their own worktree therefore shows one workspace per session. A
+  workspace, and the agent runs in a tab inside it. When that workspace is
+  not in the worktree's repository (a city agent with no rig whose work dir
+  is a worktree of another clone, say), the worktree workspace is grouped
+  under the workspace at that repository's root instead, which gc creates,
+  labeled with the repository's name, if herdr has none open. A pool whose
+  sessions each get their own worktree therefore shows one workspace per session. A
   herdr without `worktree` support, or one that refuses to open the
   checkout, falls back to a tab in the rig workspace and logs one
   `herdr: worktree placement … unavailable, using tab` line. gc never
